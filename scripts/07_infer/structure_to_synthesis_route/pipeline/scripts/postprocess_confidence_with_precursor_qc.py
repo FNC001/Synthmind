@@ -81,6 +81,15 @@ def main():
     if "route_warnings" not in df.columns:
         df["route_warnings"] = ""
 
+    for col in [
+        "route_confidence_level",
+        "route_warning_level",
+        "route_recommendation_status",
+        "route_warnings",
+    ]:
+        if col in df.columns:
+            df[col] = df[col].apply(clean).astype(object)
+
     changed_major = 0
     changed_minor = 0
 
