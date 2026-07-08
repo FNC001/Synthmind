@@ -1,2 +1,0 @@
-key,json_path,prediction_csv
-ExampleMaterial,/absolute/path/to/ExampleMaterial_three_tasks.json,/absolute/path/to/ExampleMaterial_final_top_routes_with_condition_confidence.csv

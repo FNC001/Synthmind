@@ -1,6 +1,6 @@
 import unittest
 
-from synpred.research.schema import (
+from synthmind.research.schema import (
     CandidatePool,
     ConditionDistributionGenerator,
     GlobalRouteVerifier,

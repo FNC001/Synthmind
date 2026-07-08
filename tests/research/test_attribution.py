@@ -1,7 +1,7 @@
 import pandas as pd
 import unittest
 
-from synpred.research.attribution import attribute_candidates, summarize_attribution
+from synthmind.research.attribution import attribute_candidates, summarize_attribution
 
 
 class AttributionTest(unittest.TestCase):

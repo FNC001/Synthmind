@@ -1,0 +1,91 @@
+pipeline_name: precursor_only
+infer_name: demo_poscar_test
+project_root: .
+device: cpu
+
+paths:
+  poscar_dir: "{project_root}/data/infer/{infer_name}/poscars"
+  work_dir: "{project_root}/data/interim/infer/{infer_name}"
+  out_dir: "{project_root}/outputs/inference/{infer_name}_precursor_only"
+
+steps:
+  make_infer_split: true
+  build_structdesc: true
+  build_chgnet_embedding: true
+  finalize_graph_embedding: true
+  build_stage2_features: true
+  build_stage2_npz: true
+  sample_stage2_gflownet: true
+  constrain_stage2_by_composition: true
+  summarize_stage2: true
+  add_composition_fallback: true
+  retrieve_stage2_candidates: true
+  predict_stage2_baseline: true
+  merge_stage2_sources: true
+  rerank_stage2_by_elements: true
+  fix_stage2_global_rank: true
+  build_stage3_features: false
+  build_stage3_conditioned_table: false
+  run_stage3_flow: false
+  summarize_routes: false
+  filter_display_routes: false
+  stage35_rule_rerank: false
+  stage35_learned_rerank: false
+  stage35_v21_rerank: false
+  best_route_per_precursor: false
+  export_precursor_only_report: true
+
+stage2:
+  gflownet_run_dir: "{project_root}/runs/stage2/gflownet_joint_rerank_hybrid_gold_only_v1"
+  gflownet_ckpt: "{stage2.gflownet_run_dir}/best_model.pt"
+  template_dir: "{project_root}/data/interim/generative/stage2_gflownet_dataset/hybrid/gold_only"
+  precursor_vocab_json: "{project_root}/data/interim/graph_cache/chgnet_stage2/precursor_vocab.json"
+  n_samples: 100
+  temperature: 1.0
+  top_k: 20
+  batch_size: 128
+  summary_top_n: 100
+  sampler_mode: composition_biased
+  target_hit_bonus: 6.0
+  extra_element_penalty: 1.0
+  no_overlap_penalty: 6.0
+  stop_bias: -2.0
+  ignore_elements:
+    - H
+    - O
+  seed: 42
+
+composition_constraint:
+  min_coverage: 0.0
+  coverage_weight: 20.0
+  extra_penalty_weight: 5.0
+  rank_weight: 0.01
+  top_n_per_sample: 100
+  drop_zero_overlap: false
+
+fallback:
+  top_n: 20
+
+retrieval:
+  top_k: 50
+  min_similarity: 0.0
+  label_threshold: 0.5
+
+baseline:
+  model: "{project_root}/runs/stage2/extratrees_multilabel_hybrid_gold_only_v1/stage2_extratrees_multilabel.joblib"
+  top_k_labels: 12
+  top_k_sets: 30
+  min_prob: 0.02
+  max_set_size: 4
+
+element_rerank:
+  top_n: 30
+  coverage_weight: 20.0
+  extra_penalty_weight: 5.0
+  rank_weight: 0.01
+
+graph:
+  cgcnn_checkpoint: "{project_root}/runs/graph_models/cgcnn_stage2_multilabel/best_cgcnn_stage2.pt"
+  cgcnn_model_py: ""
+  cgcnn_model_class: CGCNNStage2Model
+  max_sites: 300

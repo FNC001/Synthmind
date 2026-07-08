@@ -1,7 +1,7 @@
 from pathlib import Path
 import unittest
 
-from synpred.research.metrics.registry import MetricRegistry
+from synthmind.research.metrics.registry import MetricRegistry
 
 
 class MetricRegistryTest(unittest.TestCase):

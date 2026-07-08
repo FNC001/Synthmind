@@ -83,7 +83,7 @@
     "feat_frac_el__Ba",
     "feat_frac_el__Be"
   ],
-  "source_file": "/Users/lihonglin/Desktop/Syn_DP/SynPred/data/interim.local_bak_20260612/generative/stage3_condition_dataset_chem_checked/core_methods_v5_20260610/test.csv",
+  "source_file": "data/interim/generative/stage3_condition_dataset_chem_checked/core_methods_v5/test.csv",
   "source_fingerprint_sample": "946e18374e7efc7492c6fe70d4e6c29fcc979697f67c3da36de3c00d7c0213e2",
   "split_version": "chemistry_disjoint_v1",
   "status": "field_available_manifest_only"

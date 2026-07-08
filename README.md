@@ -1,108 +1,29 @@
 # Synthmind
 
-Synthmind is the public code release of the SynPred structure-to-synthesis workflow for inorganic materials.  It contains the calculation code for precursor-set prediction, synthesis-condition/process-pool prediction, route assembly, confidence/QC post-processing, and final route ranking.
+Synthmind is a cleaned public release of the current structure-to-synthesis workflow for inorganic materials. It keeps the best runnable code path for precursor prediction, synthesis-condition prediction, route assembly, confidence/QC post-processing, and final route ranking.
 
-This repository intentionally excludes training datasets, model checkpoints, private inference outputs, generated reports, logs, and machine credentials.  To reproduce trained predictions you need to supply the corresponding data/model artifacts under the paths expected by the configs, or override those paths in your own config.
+Training datasets, model checkpoints, generated inference outputs, reports, logs, and credentials are intentionally excluded.
 
-## What Is Included
-
-```text
-.
-├── synpred/                         # Reusable research modules
-│   └── research/                    # Candidate pools, schemas, splits, metrics, attribution
-├── research/                        # YAML/JSON experiment specs and candidate-budget configs
-├── scripts/
-│   ├── 00_refine/                   # Raw synthesis-record refinement and normalization
-│   ├── 01_split/                    # Group/task split construction
-│   ├── 02_features/                 # Structure/condition feature tables
-│   ├── 03_data/                     # Stage2/Stage3/Stage35 dataset and candidate builders
-│   ├── 03_graph/                    # CGCNN/ALIGNN/CHGNet graph caches and embeddings
-│   ├── 04_train/                    # Stage2, Stage3, Stage35 model training code
-│   ├── 06_eval/                     # Candidate-pool, calibration, route-stack evaluation
-│   ├── 07_infer/                    # Full structure-to-synthesis inference pipelines
-│   ├── 08_auto_improve/             # Diagnostic and improvement experiments
-│   ├── 09_remote_autodl/            # Remote execution helper scripts without credentials
-│   ├── 10_autorun/                  # Long-run training/evaluation queues
-│   ├── 11_paper/                    # Paper/table/figure generation helpers
-│   ├── 12_research/                 # Additional research training entry points
-│   ├── reporting/                   # DOCX/POSCAR reporting utilities
-│   └── figures/                     # Figure utilities
-├── docs/                            # Pipeline and method documentation
-├── tests/                           # Lightweight research-module tests
-├── examples/                        # Small manifest examples
-└── requirements.txt
-```
-
-## Pipeline Overview
-
-The main inference pipeline is:
-
-1. Structure input preparation from POSCAR files.
-2. Structural descriptors and graph embeddings.
-3. Stage2 precursor candidate generation:
-   GFlowNet sampling, composition constraints, retrieval augmentation, fallback completion, baseline ensemble candidates, and element-aware reranking.
-4. Stage3 process/condition prediction:
-   precursor-conditioned temperature, time, atmosphere, and condition-distribution estimates.
-5. Stage35 route construction and ranking:
-   readable route table generation, display filtering, rule/learned reranking where artifacts exist, route confidence, precursor QC, condition support, and final recommended-route export.
-
-The primary entry point is:
-
-```bash
-python scripts/07_infer/structure_to_synthesis_route/pipeline/run_pipeline.py \
-  --config scripts/07_infer/structure_to_synthesis_route/pipeline/configs/full_route_stage3.yaml \
-  --project_root "$(pwd)" \
-  --infer_name demo_poscar_test
-```
-
-For precursor-set prediction only:
-
-```bash
-python scripts/07_infer/structure_to_synthesis_route/pipeline/run_pipeline.py \
-  --config scripts/07_infer/structure_to_synthesis_route/pipeline/configs/precursor_only.yaml \
-  --project_root "$(pwd)" \
-  --infer_name demo_poscar_test
-```
-
-Expected POSCAR layout:
+## Repository Layout
 
 ```text
-data/infer/<infer_name>/poscars/
-  case_001/POSCAR
-  case_002/POSCAR
+configs/                  # Public pipeline configs
+pipeline/
+  core/                   # End-to-end inference steps
+  postprocess/            # QC, confidence, reporting, and final ranking helpers
+  ranking/                # Route-ranker feature/ranking modules
+  run_pipeline.py         # Main pipeline entry point
+scripts/                  # Thin user-facing run wrappers
+training/                 # Selected training entry points for current models
+synthmind/                # Reusable research utilities
+research/specs/           # Lightweight task, metric, and split specs
+docs/                     # Pipeline/config/output documentation
+tests/                    # Lightweight unit tests
 ```
 
-Main outputs are written under:
-
-```text
-outputs/inference/<infer_name>/
-```
-
-including `final_recommended_routes.csv`, `final_recommended_routes.md`, precursor-only recommendations, route QC tables, confidence layers, and a pipeline manifest when the required model artifacts are present.
-
-## Training And Evaluation Code
-
-The repository includes the complete training/evaluation source code, but not the private training data or trained artifacts:
-
-- Stage2 precursor models:
-  `scripts/04_train/stage2/`
-- Stage3 condition/process models:
-  `scripts/04_train/stage3/`
-- Stage35 route-ranker models:
-  `scripts/04_train/stage35/`
-- Candidate-pool and calibration evaluation:
-  `scripts/06_eval/`
-- End-to-end training orchestration:
-  `scripts/run_prepare_training_data.sh`,
-  `scripts/run_train_models.sh`,
-  `scripts/run_stage2_stage3_benchmark.sh`,
-  `scripts/run_full_pipeline.sh`
-
-These scripts expect training data in `data/` and model outputs in `runs/`; both directories are ignored by Git.
+Removed from the public tree: old staged experiments, paper/table/figure code, remote-machine helper scripts, historical benchmark batches, generated reports, and private data.
 
 ## Installation
-
-Create a fresh environment:
 
 ```bash
 python -m venv .venv
@@ -111,22 +32,14 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-GPU training and CHGNet/torch inference should be installed according to the CUDA version of the target machine.  CPU-only smoke checks can still validate imports and many data-processing scripts.
+Install GPU-specific packages such as PyTorch/CHGNet/LightGBM according to the target machine CUDA stack.
 
-## Model/Data Artifacts
+## Required Artifacts
 
-The public repository does not contain:
-
-- raw or refined training datasets
-- graph caches and feature matrices
-- `runs/` model checkpoints or serialized estimators
-- private `outputs/` inference/evaluation results
-- generated DOCX/PDF/PNG/TGZ artifacts
-- credentials, SSH keys, API keys, or machine-local config
-
-Typical artifact paths referenced by the configs include:
+The configs expect model/data artifacts under ignored local directories:
 
 ```text
+data/infer/<infer_name>/poscars/
 data/interim/...
 runs/stage2/...
 runs/stage3/...
@@ -134,37 +47,79 @@ runs/stage35/...
 outputs/inference/...
 ```
 
-Copy or regenerate those artifacts locally before running trained inference.  The pipeline records missing optional rankers as degraded steps; required model/data files must exist for the corresponding enabled stages.
+These directories are not tracked by Git. Copy artifacts from the training machine or regenerate them locally before full inference.
 
-## Utilities
+## Run Inference
 
-The `scripts/reporting/` utilities remain available for the earlier three-structure report workflow:
+Place POSCAR inputs like this:
 
-- `json_three_tasks_to_symmetry_poscar.py`
-- `json_three_tasks_to_poscar.py`
-- `build_synthesis_report.py`
+```text
+data/infer/demo_poscar_test/poscars/
+  case_001/POSCAR
+  case_002/POSCAR
+```
 
-These utilities are separate from the main algorithm pipeline and are useful for preparing POSCAR inputs or writing DOCX summaries from route CSV outputs.
+Run the full structure-to-synthesis route pipeline:
+
+```bash
+scripts/run_full_route.sh demo_poscar_test
+```
+
+Equivalent direct command:
+
+```bash
+python pipeline/run_pipeline.py \
+  --config configs/full_route.yaml \
+  --project_root "$(pwd)" \
+  --infer_name demo_poscar_test
+```
+
+Run precursor prediction only:
+
+```bash
+scripts/run_precursor_only.sh demo_poscar_test
+```
+
+Main outputs are written to:
+
+```text
+outputs/inference/<infer_name>/
+```
+
+The stable user-facing route files are:
+
+```text
+final_recommended_routes.csv
+final_recommended_routes.md
+pipeline_v3_manifest.json
+```
+
+## Training Entry Points
+
+Current selected training scripts are grouped by model family:
+
+```text
+training/precursor/train_gflownet.py
+training/precursor/train_mlp_baseline.py
+training/conditions/train_lgbm_method_experts.py
+training/conditions/train_lgbm_quantile_ensemble.py
+training/ranking/train_route_reranker.py
+```
+
+Training scripts expect local data under `data/` and write artifacts under `runs/` or `outputs/`; those paths remain ignored.
 
 ## Verification
 
-Run lightweight checks:
+Lightweight checks:
 
 ```bash
-python -m py_compile \
-  scripts/07_infer/structure_to_synthesis_route/pipeline/run_pipeline.py \
-  scripts/07_infer/structure_to_synthesis_route/pipeline/src/*.py \
-  synpred/research/*.py
-
-pytest tests
+python -m compileall -q pipeline training synthmind tests
+python -m unittest discover -s tests/research -p 'test_*.py'
+python pipeline/run_pipeline.py --help
 ```
 
-Full end-to-end prediction requires the excluded model/data artifacts.
+Full prediction requires the excluded model and data artifacts.
 
-## Safety Note
+## Safety
 
-Synthmind produces predictive synthesis-route recommendations, not validated laboratory procedures.  Any suggested precursor, temperature, time, atmosphere, solvent, or process route must be reviewed by domain experts before experimental use.
-
-## License
-
-No license has been selected yet. Add a license file before distributing the code for broad reuse.
+Synthmind produces predictive synthesis-route recommendations, not validated laboratory procedures. Suggested precursors, temperatures, times, atmospheres, solvents, or process routes must be reviewed by domain experts before experimental use.

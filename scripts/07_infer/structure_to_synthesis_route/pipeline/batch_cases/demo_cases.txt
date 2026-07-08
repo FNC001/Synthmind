@@ -1,4 +1,0 @@
-demo_poscar_test
-case_001
-case_002
-case_003

@@ -1,7 +1,7 @@
 import pandas as pd
 import unittest
 
-from synpred.research.candidate_pool import BudgetConfig, dedupe_and_budget
+from synthmind.research.candidate_pool import BudgetConfig, dedupe_and_budget
 
 
 class CandidateBudgetTest(unittest.TestCase):

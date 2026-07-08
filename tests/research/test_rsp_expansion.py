@@ -5,7 +5,7 @@ from collections import Counter
 
 import pandas as pd
 
-from synpred.research.run_rsp_expansion import (
+from synthmind.research.run_rsp_expansion import (
     ExpansionConfig,
     PrecursorLibrary,
     canonical_set_key,
@@ -14,7 +14,7 @@ from synpred.research.run_rsp_expansion import (
     normalize_candidates,
     rank_variant,
 )
-from synpred.research.run_rsp_prune_recovery import PruneConfig, generate_prune_candidates
+from synthmind.research.run_rsp_prune_recovery import PruneConfig, generate_prune_candidates
 
 
 class RspExpansionTest(unittest.TestCase):
