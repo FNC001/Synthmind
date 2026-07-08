@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -61,6 +62,8 @@ class PipelineRunner:
             self._step_name = None
 
     def run(self, cmd: List[str], required: bool = True):
+        if cmd and str(cmd[0]) == "python":
+            cmd = [sys.executable, *cmd[1:]]
         self.log("[RUN] " + " ".join(map(str, cmd)))
         try:
             subprocess.run(list(map(str, cmd)), check=True)

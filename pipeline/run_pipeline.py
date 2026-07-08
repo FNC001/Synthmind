@@ -336,10 +336,13 @@ def main() -> None:
 
     step_funcs, steps_common, steps_reliability = build_step_funcs()
 
-    cfg = load_config(args.config)
-    cfg = apply_infer_name_override(cfg, getattr(args, "infer_name", None))
-
-    cfg = apply_project_root_override(cfg, getattr(args, "project_root", None))
+    cfg = load_config(
+        args.config,
+        overrides={
+            "infer_name": getattr(args, "infer_name", None),
+            "project_root": getattr(args, "project_root", None),
+        },
+    )
     
     r = PipelineRunner(cfg)
 

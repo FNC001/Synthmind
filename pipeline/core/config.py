@@ -62,8 +62,11 @@ def resolve_templates(obj: Any, cfg: Dict[str, Any], max_iter: int = 5) -> Any:
     return obj
 
 
-def load_config(path: str | Path) -> Dict[str, Any]:
+def load_config(path: str | Path, overrides: Dict[str, Any] | None = None) -> Dict[str, Any]:
     cfg = load_yaml(path)
+
+    if overrides:
+        cfg.update({k: v for k, v in overrides.items() if v is not None})
 
     # iterative template resolution over whole config
     for _ in range(5):
