@@ -1,0 +1,31 @@
+spec_version: canonicalization_v1
+status: frozen_legacy_behavior_inventory
+content_hash_policy: sha256 over this file plus referenced alias artifacts
+referenced_artifacts:
+  precursor_alias_patch_v5: data/interim.local_bak_20260612/ontology/precursor_alias_patch_v5_20260610/precursor_alias_patch_v5.csv
+  precursor_ontology_v4: data/interim.local_bak_20260612/ontology/precursor_ontology_v4_20260610/precursor_ontology.json
+normalization_domains:
+  precursor:
+    - alias patch from v5 artifact where available
+    - hydrate and formula strings follow legacy parser behavior
+    - formula ordering follows canonical labels in precursor ontology artifact
+  atmosphere:
+    unknown_tokens: ["<UNK_OR_MISSING>", "", "nan", "none", "null"]
+    strict_match: lower-case exact match when true atmosphere is known
+  solvent:
+    unknown_tokens: ["<UNK_OR_MISSING>", "", "nan", "none", "null"]
+    policy: available-field label matching until complete-case protocol is fully implemented
+  temperature:
+    unit: Celsius
+    legacy_relaxed_tolerance_c: 200
+    legacy_strict_tolerance_c: 100
+  time:
+    unit: hours
+    legacy_relaxed_tolerance_h: 48
+    legacy_strict_tolerance_h: 24
+missing_value_policy:
+  empty_string: missing
+  unknown: unknown
+  not_applicable: distinct from missing when explicitly labeled
+semantic_change_rule: any semantic change must become canonicalization_v2 and must not overwrite v1
+

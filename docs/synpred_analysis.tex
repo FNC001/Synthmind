@@ -1,0 +1,155 @@
+% =============================================================================
+% SynPred 深度技术分析合集
+% Compile: xelatex synpred_analysis.tex (推荐 XeLaTeX,中文 + 数学公式)
+% 或:     latexmk -xelatex synpred_analysis.tex
+% =============================================================================
+\documentclass[11pt,a4paper]{article}
+
+% ---------- 中文支持 (XeLaTeX) ----------
+\usepackage{xeCJK}
+\setCJKmainfont{PingFang SC}            % macOS 默认中文字体;Linux 改 Noto Serif CJK SC
+\setCJKsansfont{PingFang SC}
+\setCJKmonofont{PingFang SC}
+\setmainfont{TeX Gyre Termes}           % 英文衬线
+\setmonofont{Menlo}[Scale=0.85]         % 等宽
+
+% ---------- 数学 / 排版 ----------
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{microtype}
+\usepackage{enumitem}
+\setlist[itemize]{leftmargin=1.4em,topsep=2pt,itemsep=2pt}
+\setlist[enumerate]{leftmargin=1.6em,topsep=2pt,itemsep=2pt}
+
+% ---------- 颜色 / 链接 ----------
+\usepackage{xcolor}
+\definecolor{linkcol}{HTML}{1A5FB4}
+\definecolor{citecol}{HTML}{2EC27E}
+\definecolor{urlcol}{HTML}{C64600}
+\definecolor{codebg}{HTML}{F6F8FA}
+\definecolor{codeborder}{HTML}{D0D7DE}
+\definecolor{kwcol}{HTML}{CF222E}
+\definecolor{strcol}{HTML}{0A3069}
+\definecolor{cmtcol}{HTML}{6E7781}
+
+\usepackage[colorlinks=true,
+            linkcolor=linkcol,
+            citecolor=citecol,
+            urlcolor=urlcol,
+            bookmarksopen=true]{hyperref}
+
+% ---------- 表格 ----------
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{makecell}
+\renewcommand{\arraystretch}{1.15}
+
+% ---------- 代码块 ----------
+\usepackage{listings}
+\lstset{
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{codebg},
+    frame=single,
+    framerule=0.4pt,
+    rulecolor=\color{codeborder},
+    keywordstyle=\color{kwcol}\bfseries,
+    stringstyle=\color{strcol},
+    commentstyle=\color{cmtcol}\itshape,
+    showstringspaces=false,
+    breaklines=true,
+    breakatwhitespace=true,
+    tabsize=2,
+    aboveskip=6pt,
+    belowskip=6pt,
+    columns=fullflexible,
+    keepspaces=true,
+}
+\lstdefinelanguage{yaml}{
+    keywords={true,false,null,True,False,None},
+    keywordstyle=\color{kwcol}\bfseries,
+    sensitive=true,
+    comment=[l]{\#},
+    commentstyle=\color{cmtcol}\itshape,
+    morestring=[b]',
+    morestring=[b]",
+    stringstyle=\color{strcol},
+}
+
+% ---------- 章节样式 ----------
+\usepackage{titlesec}
+\titleformat{\section}{\Large\bfseries\color{linkcol}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{0.6em}{}
+
+% ---------- 提示框 ----------
+\usepackage[most]{tcolorbox}
+\newtcolorbox{repobox}[1][]{%
+    enhanced, breakable,
+    colback=blue!3, colframe=linkcol,
+    boxrule=0.5pt, arc=2pt,
+    left=8pt, right=8pt, top=4pt, bottom=4pt,
+    title=#1,
+    fonttitle=\bfseries\small\color{white},
+    coltitle=white,
+    colbacktitle=linkcol,
+}
+\newtcolorbox{warnbox}[1][]{%
+    enhanced, breakable,
+    colback=orange!5, colframe=urlcol,
+    boxrule=0.5pt, arc=2pt,
+    left=8pt, right=8pt, top=4pt, bottom=4pt,
+    title=#1,
+    fonttitle=\bfseries\small\color{white},
+    coltitle=white,
+    colbacktitle=urlcol,
+}
+
+% ---------- 自定义命令 ----------
+\newcommand{\file}[1]{\texttt{\small #1}}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\param}[1]{\texttt{\small\color{kwcol}#1}}
+\newcommand{\stagestep}[1]{\textbf{STEP #1}}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+
+% =============================================================================
+\title{\bfseries SynPred 深度技术分析\\
+       \large{Stage 04 / Stage35 / Stage 07 三大模块逐字可重复指南}}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本文档整合了 SynPred(Structure-to-Synthesis Route Recommendation)项目三个核心模块的逐行级技术分析,达到"按本文步骤逐字执行即可复现"的程度:
+
+\begin{itemize}
+    \item \textbf{Part I — Stage 04 Stage3 条件预测模型}:从 Mixture Residual Flow 到 LightGBM Quantile Ensemble,覆盖 5 份训练脚本(\textasciitilde 4000 行)+ 1 份 LGBM 推理脚本。
+    \item \textbf{Part II — Stage35 联合排序器}:V21 兼容性 ExtraTrees(主力) + V43 Template-Aware Pairwise Ranker + V3 Learned Regressor 三种排序范式,共 6 份脚本(\textasciitilde 2600 行)+ pipeline 编排 + 配置层。
+    \item \textbf{Part III — Stage 07 端到端推理流水线}:28 个 step 全景,\file{run\_pipeline.py} 状态机、配置模板、断点续跑、降级行为、可靠性层 17 个子函数(共 \textasciitilde 4000 行)。
+\end{itemize}
+
+每一部分均包含:核心思想、模块架构、逐函数解析、关键工程决策、端到端复现指南、验收清单、常见坑、设计哲学与可改进点。
+
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ============================================================ Part I
+\input{part1_stage04_stage3.tex}
+\newpage
+
+% ============================================================ Part II
+\input{part2_stage35.tex}
+\newpage
+
+% ============================================================ Part III
+\input{part3_stage07.tex}
+
+\end{document}

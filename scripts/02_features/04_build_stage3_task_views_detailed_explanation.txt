@@ -1,0 +1,772 @@
+04_build_stage3_task_views.py 详细讲解
+=======================================
+
+一、脚本的总体定位
+------------------
+
+一句话总结：
+这个脚本的作用不是重新提取结构特征，也不是直接训练模型，而是在已经完成 stage3 目标重加工之后，把 stage3 的总表进一步拆分成多个“单任务视图（task views）”，让后续不同目标的模型训练更清晰、更简洁、更模块化。
+
+它在整个流程中的位置大致是：
+
+split 后的 JSONL
+  ↓
+01_build_structdesc_features.py
+  ↓
+structdesc_features/
+  ↓
+02_reprocess_stage3_targets.py
+  ↓
+structdesc_features_stage3_v2/
+  ↓
+04_build_stage3_task_views.py
+  ↓
+stage3_task_views/
+  ├─ temperature_train.csv
+  ├─ time_bucket_train.csv
+  ├─ atmosphere_coarse_train.csv
+  ├─ solvent_train.csv
+  ├─ synthesis_type_train.csv
+  └─ 对应 val/test/gold_train_holdout 版本
+
+也就是说，这个脚本不是做新的信息生成，而是在已有 stage3 总表基础上，按具体目标任务重新组织数据，使之更方便后续单任务训练。
+
+------------------------------------------
+二、为什么需要这个脚本
+------------------------------------------
+
+在经过 02_reprocess_stage3_targets.py 之后，stage3 的 raw 表里通常已经包含：
+
+- 特征列（feat_*、graph_emb_* 等）
+- meta 列（id、material_id、formula、doi 等）
+- 多种 stage3 目标列，例如：
+  - target_temperature_c_clean
+  - target_time_bucket
+  - target_atmosphere_coarse
+  - target_solvent_clean
+  - synthesis_type
+- 一些辅助列，例如：
+  - target_time_h_log1p
+  - target_time_h_clean
+  - target_atmosphere
+  - target_solvent
+
+这些信息虽然都在一张表里，但如果后面直接拿这张大表做不同任务，会有几个问题：
+
+1. 不同任务需要的目标列不同
+例如：
+- 温度任务只关心 target_temperature_c_clean
+- 时间任务只关心 target_time_bucket
+- atmosphere 任务只关心 target_atmosphere_coarse
+- 溶剂任务只关心 target_solvent_clean
+
+如果始终共用一张大表，下游脚本每次都要手动判断“这次该取哪个目标列”，逻辑会比较混乱。
+
+2. 某些任务还想保留少量相关辅助列
+例如：
+- 时间桶任务除了 target_time_bucket，还可能需要 target_time_h_log1p
+- atmosphere 任务除了 coarse 类别，还想保留原始 target_atmosphere
+- solvent 任务也可能希望保留原始 target_solvent 以便追溯
+
+所以更合理的方式是：提前把每个任务需要的数据拆好。
+
+3. 单任务建模会更简单
+如果下游每个模型只读取一张“专用任务表”，训练脚本会很整洁：
+- 读 temperature_train.csv -> 做温度回归
+- 读 atmosphere_coarse_train.csv -> 做粗粒度气氛分类
+- 读 solvent_train.csv -> 做溶剂分类
+
+因此，这个脚本本质上是在做：
+stage3 多目标总表的任务解耦。
+
+------------------------------------------
+三、输入与输出
+------------------------------------------
+
+1. 输入目录
+默认输入目录为：
+
+/Users/wyc/MP_exp_doi/data/interim/features/structdesc_features_stage3_v2
+
+这个目录是 02_reprocess_stage3_targets.py 的输出目录。
+
+它至少应当包含：
+- stage3_train_raw.csv
+- stage3_val_raw.csv
+- stage3_test_raw.csv
+- stage3_gold_train_holdout_raw.csv
+
+2. 输出目录
+默认输出目录为：
+
+/Users/wyc/MP_exp_doi/data/interim/features/stage3_task_views
+
+3. 输出文件
+对于每个 split（train / val / test / gold_train_holdout），脚本会生成 5 张任务视图表：
+
+(1) 温度任务表
+- temperature_train.csv
+- temperature_val.csv
+- temperature_test.csv
+- temperature_gold_train_holdout.csv
+
+(2) 时间分桶任务表
+- time_bucket_train.csv
+- time_bucket_val.csv
+- time_bucket_test.csv
+- time_bucket_gold_train_holdout.csv
+
+(3) 粗粒度 atmosphere 任务表
+- atmosphere_coarse_train.csv
+- atmosphere_coarse_val.csv
+- atmosphere_coarse_test.csv
+- atmosphere_coarse_gold_train_holdout.csv
+
+(4) 溶剂任务表
+- solvent_train.csv
+- solvent_val.csv
+- solvent_test.csv
+- solvent_gold_train_holdout.csv
+
+(5) 合成类型任务表
+- synthesis_type_train.csv
+- synthesis_type_val.csv
+- synthesis_type_test.csv
+- synthesis_type_gold_train_holdout.csv
+
+此外还会输出：
+- summary.json
+
+这个 summary 会记录每个 split 下 5 类任务视图的统计信息。
+
+------------------------------------------
+四、脚本的整体执行逻辑
+------------------------------------------
+
+这个脚本的 main() 可以概括为以下步骤：
+
+第 1 步：读取输入目录和输出目录参数
+第 2 步：创建输出目录
+第 3 步：遍历 train / val / test / gold_train_holdout 四个 split
+第 4 步：对每个 split 读入 stage3_*_raw.csv
+第 5 步：分别构建 5 类 task view
+第 6 步：将每类 task view 输出为独立 CSV
+第 7 步：对每类 task view 计算摘要统计
+第 8 步：把所有摘要信息汇总写入 summary.json
+
+因此，这个脚本的核心不是复杂算法，而是：
+把 stage3 总表拆成多个任务专用表，并把任务统计也一并整理好。
+
+------------------------------------------
+五、基础工具函数
+------------------------------------------
+
+1. ensure_dir(path)
+作用：
+如果目录不存在，则递归创建目录。
+
+用于保证输出目录存在。
+
+2. write_json(path, obj)
+作用：
+把 Python 对象写成 JSON 文件。
+
+这里主要用于输出：
+- stage3_task_views/summary.json
+
+3. load_csv(path)
+作用：
+使用 pandas 读取 CSV 文件，返回 DataFrame。
+
+这是读取 stage3_*_raw.csv 的基础。
+
+------------------------------------------
+六、特征列识别：detect_feature_cols
+------------------------------------------
+
+函数：
+detect_feature_cols(df)
+
+作用：
+从输入 DataFrame 中自动识别“应该作为模型输入特征”的列。
+
+它保留以下前缀的列：
+- feat_
+- graph_emb_
+- cgcnn_graph_emb_
+- alignn_graph_emb_
+
+也就是说，只要某一列名满足这些前缀之一，就会被视为输入特征。
+
+这说明该脚本不仅兼容最早的传统结构描述符（feat_*），还兼容图嵌入特征，例如：
+- 通用 graph_emb_*
+- CGCNN 图嵌入
+- ALIGNN 图嵌入
+
+因此，这个脚本本质上是一个比较通用的“任务视图构建器”，而不是仅适用于最早的表格特征版本。
+
+------------------------------------------
+七、元信息列识别：detect_meta_cols
+------------------------------------------
+
+函数：
+detect_meta_cols(df)
+
+作用：
+从输入 DataFrame 中选出一些优先保留的元信息列。
+
+它的 preferred 列表包括：
+- id
+- material_id
+- formula
+- doi
+- split_group
+- source_dataset
+- synthesis_type
+
+如果这些列存在，就会被保留到任务视图表中。
+
+这些列的作用不是作为模型输入，而是为了：
+- 样本追踪
+- 调试分析
+- 误差分析
+- 按 DOI / formula 回看原始来源
+- 做数据统计
+
+因此，每个任务视图并不是一个“纯特征矩阵”，而是一个保留了少量追踪信息的训练表。
+
+------------------------------------------
+八、文本标签标准化：normalize_text_label
+------------------------------------------
+
+函数：
+normalize_text_label(x)
+
+作用：
+对文本型目标标签做轻量规范化。
+
+逻辑为：
+- None -> None
+- 转成字符串
+- 去首尾空格
+- 转成小写
+- 如果是空字符串或 "nan"，则返回 None
+- 否则返回规范化后的字符串
+
+示例：
+- " Air " -> "air"
+- "Water" -> "water"
+- "  NH3 " -> "nh3"
+- nan -> None
+
+这个函数主要用于：
+- atmosphere 目标
+- solvent 目标
+- synthesis_type（如果其 dtype 为 object）
+
+其作用是避免不同大小写和空白形式导致的标签碎片化。
+
+------------------------------------------
+九、核心函数：build_single_target_view
+------------------------------------------
+
+函数：
+build_single_target_view(
+    df,
+    preferred_target_cols,
+    canonical_target_col,
+    extra_keep_cols=None
+)
+
+这是整个脚本最核心、最抽象的通用函数。
+
+它的目标是：
+给定一张 stage3 总表，提取出“某一个具体任务”的专用训练表。
+
+它的处理逻辑如下。
+
+1. 自动检测输入特征列
+通过 detect_feature_cols(df)，收集所有应该作为模型输入的列。
+
+2. 自动检测 meta 列
+通过 detect_meta_cols(df)，收集应该保留的元信息列。
+
+3. 从一组候选目标列中找到实际可用的目标列
+它会按顺序遍历 preferred_target_cols，只要发现某列存在，就把它作为当前任务的 target_col。
+
+例如，温度任务里它会依次尝试：
+- target_temperature_c_clean
+- temperature_c_clean
+- target_temperature_c
+- temperature_c
+
+只要其中一个存在，就会被接受。
+
+这使得脚本能够兼容不同版本的数据表。
+
+4. 组装要保留的列
+最终保留：
+- meta_cols
+- feature_cols
+- target_col
+- extra_keep_cols（如果指定）
+
+5. 去重保序
+因为某些列可能重复加入，所以它会做一次“去重但保留原顺序”。
+
+6. 统一目标列名
+如果实际找到的 target_col 不是 canonical_target_col，就会重命名为 canonical_target_col。
+
+这样，最终输出的任务视图无论输入表目标列叫啥，都会统一成稳定的列名。
+
+7. 对 object 类型目标列做轻量规范化
+如果目标列的数据类型是 object，就应用 normalize_text_label。
+
+8. 增加 has_target 列
+最后新增：
+has_target = 该目标列是否非空
+
+具体为：
+- 有目标值 -> 1
+- 无目标值 -> 0
+
+这列在后续非常有用，因为你可以直接按 has_target 过滤可训练样本，也可以用它构建缺失 mask。
+
+因此，build_single_target_view 的本质是：
+从 stage3 总表中抽取一个“单任务专属数据视图”，并统一目标列名与有效性标记。
+
+------------------------------------------
+十、五类任务视图的具体构建逻辑
+------------------------------------------
+
+这个脚本的 5 个任务视图，本质上都是对 build_single_target_view 的封装。
+
+--------------------------------
+(一) build_temperature_view
+--------------------------------
+
+函数：
+build_temperature_view(df)
+
+目标：
+构建温度任务视图。
+
+候选目标列优先级：
+- target_temperature_c_clean
+- temperature_c_clean
+- target_temperature_c
+- temperature_c
+
+统一输出目标列名：
+target_temperature_c_clean
+
+不额外保留其他辅助列。
+
+因此，温度任务表的核心结构是：
+- meta 列
+- 特征列
+- target_temperature_c_clean
+- has_target
+
+这是一个典型的温度回归任务视图。
+
+--------------------------------
+(二) build_time_bucket_view
+--------------------------------
+
+函数：
+build_time_bucket_view(df)
+
+目标：
+构建时间分桶任务视图。
+
+候选目标列优先级：
+- target_time_bucket
+- time_bucket
+
+统一输出目标列名：
+target_time_bucket
+
+额外保留：
+- target_time_h_log1p / time_h_log1p
+- target_time_h_clean / time_h_clean
+- target_time_h / time_h
+
+这说明：
+主任务目标是时间分桶分类，但作者同时保留了时间连续值及其 log1p 版本，方便后续：
+- 做辅助分析
+- 做联合建模
+- 比较分类与回归表现
+
+因此时间视图不仅仅是一个分类表，它还保留了较完整的时间信息。
+
+--------------------------------
+(三) build_atmosphere_view
+--------------------------------
+
+函数：
+build_atmosphere_view(df)
+
+目标：
+构建粗粒度 atmosphere 任务视图。
+
+候选目标列优先级：
+- target_atmosphere_coarse
+- atmosphere_coarse
+- target_atmosphere
+- atmosphere
+
+统一输出目标列名：
+target_atmosphere_coarse
+
+额外保留：
+- target_atmosphere
+- atmosphere
+
+这说明主任务是 coarse atmosphere 分类，但原始 atmosphere 也被保留，便于：
+- 看 coarse 类别对应的原始标签
+- 分析 coarse 映射过程
+- 做更细粒度的后续建模
+
+--------------------------------
+(四) build_solvent_view
+--------------------------------
+
+函数：
+build_solvent_view(df)
+
+目标：
+构建溶剂任务视图。
+
+候选目标列优先级：
+- target_solvent_clean
+- solvent_clean
+- target_solvent
+- solvent
+
+统一输出目标列名：
+target_solvent_clean
+
+额外保留：
+- target_solvent
+- solvent
+
+这意味着：
+主任务使用规范化后的溶剂标签，但仍保留原始溶剂字段，方便做标签追溯。
+
+--------------------------------
+(五) build_synthesis_type_view
+--------------------------------
+
+函数：
+build_synthesis_type_view(df)
+
+目标：
+构建合成类型任务视图。
+
+候选目标列优先级：
+- synthesis_type
+- target_synthesis_type
+
+统一输出目标列名：
+synthesis_type
+
+不额外保留其他列。
+
+这是五类视图中最简单的一类，基本就是把 synthesis_type 抽成一个独立任务。
+
+------------------------------------------
+十一、统计函数：summarize_view
+------------------------------------------
+
+函数：
+summarize_view(df, target_col)
+
+作用：
+对某一个任务视图表做摘要统计。
+
+它输出的内容包括：
+
+1. 基本规模信息
+- n_rows：总行数
+- n_features：特征列数量
+- n_target_nonnull：目标列非空数量
+- n_has_target：has_target 的求和
+
+2. 针对目标列的统计信息
+
+(1) 如果目标列是数值型
+输出：
+- min
+- max
+- mean
+- median
+
+这主要用于温度任务。
+
+(2) 如果目标列是非数值型
+输出类别分布：
+- target_dist = 各类别计数
+
+这主要用于：
+- time_bucket
+- atmosphere_coarse
+- solvent
+- synthesis_type
+
+这个摘要非常有用，因为它能快速告诉你：
+- 温度范围是否合理
+- 时间桶是否分布不平衡
+- atmosphere_coarse 哪类最多
+- solvent 类别是否太碎
+- synthesis_type 是否过于偏科
+
+------------------------------------------
+十二、单个 split 的处理：process_split
+------------------------------------------
+
+函数：
+process_split(split_name, input_dir, output_dir)
+
+作用：
+对某一个 split（例如 train）完成整套 task view 构建。
+
+它的流程如下：
+
+1. 读入输入文件
+例如：
+stage3_train_raw.csv
+
+2. 依次构建 5 张任务视图表
+- temp_df = build_temperature_view(df)
+- time_df = build_time_bucket_view(df)
+- atm_df = build_atmosphere_view(df)
+- solv_df = build_solvent_view(df)
+- synth_df = build_synthesis_type_view(df)
+
+3. 为这 5 张表分别指定输出路径
+例如对 train：
+- temperature_train.csv
+- time_bucket_train.csv
+- atmosphere_coarse_train.csv
+- solvent_train.csv
+- synthesis_type_train.csv
+
+4. 将这 5 张表写出为 CSV
+
+5. 对每张表调用 summarize_view()
+并返回一个包含五个任务摘要的字典。
+
+因此，process_split 的本质是：
+对一个 split 的 stage3 总表，做“一进五出”的任务拆分。
+
+------------------------------------------
+十三、main() 的执行流程
+------------------------------------------
+
+main() 是整个脚本的调度中心。
+
+它的逻辑可以概括为：
+
+1. 解析参数
+支持：
+- --input_dir
+- --output_dir
+
+2. 创建输出目录
+
+3. 初始化 summary 字典
+其中记录：
+- config
+- splits
+
+4. 遍历四个 split：
+- train
+- val
+- test
+- gold_train_holdout
+
+对每个 split 调用：
+process_split(split_name, input_dir, output_dir)
+
+5. 将所有 split 的摘要写出到：
+summary.json
+
+并在终端打印该 summary。
+
+因此，main() 做的事情非常清晰：
+批量对四个 split 执行同一套 task view 生成逻辑，并把整体统计汇总保存下来。
+
+------------------------------------------
+十四、这个脚本最终产出了什么
+------------------------------------------
+
+对于每一个 split，它从一张 stage3 总表中拆出 5 张任务表。
+
+以 train 为例：
+
+输入：
+- stage3_train_raw.csv
+
+输出：
+- temperature_train.csv
+- time_bucket_train.csv
+- atmosphere_coarse_train.csv
+- solvent_train.csv
+- synthesis_type_train.csv
+
+每张任务表都包含：
+- meta 列
+- 输入特征列
+- 一个统一命名的主目标列
+- 必要的辅助列（部分任务）
+- has_target
+
+这使得后续的下游建模可以直接面向任务表开展，而不是在总表里再做二次筛选。
+
+------------------------------------------
+十五、has_target 的意义
+------------------------------------------
+
+这个脚本里一个很关键但容易被忽略的设计是：
+所有任务视图都会增加 has_target 列。
+
+其含义是：
+- 如果该行主目标列非空，则 has_target = 1
+- 否则 has_target = 0
+
+这有什么用？
+
+1. 便于训练前筛选
+后续模型训练时，可以直接只保留 has_target == 1 的样本。
+
+2. 便于缺失分析
+你可以统计：
+- 某个任务在 train/val/test 中到底有多少可用标签
+- 哪些任务目标缺失更严重
+
+3. 便于多任务学习
+如果未来把多个任务重新并回去，也可以利用 has_target 做任务级 mask。
+
+因此，这列虽然简单，但对后续流程很重要。
+
+------------------------------------------
+十六、这个脚本的核心价值
+------------------------------------------
+
+这个脚本的价值主要体现在以下几个方面。
+
+1. 任务解耦
+把 stage3 的多目标总表拆成多个单任务专用表，每个任务都拥有自己清晰的训练视图。
+
+2. 统一目标列名
+即使输入表中目标列命名不一致，输出任务表也有统一且稳定的目标字段名。
+
+3. 保留必要辅助信息
+例如：
+- 时间任务保留连续时间和 log1p 时间
+- atmosphere 任务保留原始 atmosphere
+- solvent 任务保留原始 solvent
+
+这样既方便训练，也方便分析。
+
+4. 降低下游训练脚本复杂度
+后续训练脚本不再需要在一个大表中手动找列、筛列、判断任务，而是直接读取对应任务表即可。
+
+------------------------------------------
+十七、这个脚本与前一个脚本的关系
+------------------------------------------
+
+1. 02_reprocess_stage3_targets.py 负责：
+- 对 stage3 原始目标变量做增强和标准化
+- 生成更适合建模的 target 列
+
+2. 04_build_stage3_task_views.py 负责：
+- 从增强后的 stage3 总表中
+- 按目标任务拆成多个专用任务视图
+
+两者配合起来，就形成：
+
+第一步：
+把目标变量变合理
+
+第二步：
+把合理目标组织成任务友好的数据形式
+
+因此，这个脚本是 stage3 数据准备流程中的“最后一公里整理”。
+
+------------------------------------------
+十八、局限与注意点
+------------------------------------------
+
+这个脚本虽然很实用，但也有一些边界需要注意。
+
+1. 它不会自动删除无目标样本
+它只增加了 has_target 列，但并没有直接过滤掉 has_target=0 的样本。
+因此后续训练脚本仍需要自己决定是否过滤。
+
+2. 它不会对类别标签做数值编码
+例如：
+- target_time_bucket 仍然是字符串
+- target_atmosphere_coarse 仍然是字符串
+- target_solvent_clean 仍然是字符串
+- synthesis_type 仍然是字符串
+
+所以后续如果训练分类模型，还需要做 label encoding 或 one-hot encoding。
+
+3. 它依赖输入表列名大体规范
+虽然已经通过 preferred_target_cols 提供了一定容错性，但如果输入表列名与预期差异太大，仍会报错。
+
+4. 它只处理 stage3
+这是设计使然。stage2 并不走这一套 task view 拆表逻辑。
+
+------------------------------------------
+十九、从项目角度理解这个脚本
+------------------------------------------
+
+从项目层面看，这个脚本虽然不复杂，但非常关键。
+
+因为一个成熟的数据流程，通常不能只停留在：
+“把所有东西塞进一张表里”。
+
+真正方便训练的做法是：
+按任务、按目标、按使用场景，把数据组织成更轻量、更稳定、更可复用的视图。
+
+这个脚本正是在做这件事。
+
+它把 stage3 从：
+“一个含有很多目标列的大而全总表”
+推进到：
+“多个单任务专用训练表”
+
+因此它本质上是：
+stage3 训练数据组织层的一步标准化。
+
+------------------------------------------
+二十、最简版结论
+------------------------------------------
+
+04_build_stage3_task_views.py 的核心作用就是：
+
+把 stage3 总表拆成多个单任务训练视图，包括：
+- 温度
+- 时间分桶
+- 粗粒度气氛
+- 溶剂
+- 合成类型
+
+它完成了三件事：
+
+1. 自动识别 meta 列和特征列
+2. 为每类目标构建独立任务表，并统一目标列名
+3. 为每张任务表生成 has_target 和 summary 统计
+
+因此，这个脚本是 stage3 建模前非常关键的一步“任务化拆表”。
+
+------------------------------------------
+二十一、可直接引用的简短说明
+------------------------------------------
+
+可以将该脚本概括为：
+
+该脚本从增强后的 stage3 原始特征表中，为不同下游目标分别构建独立任务视图，包括温度、时间分桶、粗粒度气氛、溶剂和合成类型五类任务。每个任务视图保留元信息列、输入特征列、统一命名后的目标列以及必要的辅助字段，并额外提供 has_target 标记，以便后续单任务模型训练、标签过滤与评估分析。

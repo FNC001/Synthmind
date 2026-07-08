@@ -1,0 +1,68 @@
+{
+  "run_id": "rsp_vnext_003_candidate_expansion",
+  "output_dir": "outputs/autorun/rsp_vnext_003_candidate_expansion",
+  "paths": {
+    "train_candidates": [
+      "outputs/evaluation/stage2_train_oof_top20_candidates_v4_20260612/train_oof_top20_precursor_candidates.csv",
+      "outputs/evaluation.local_bak_20260612/stage2_train_oof_top20_candidates_v4_20260612/train_oof_top20_precursor_candidates.csv"
+    ],
+    "validation_candidates": [
+      "outputs/evaluation/stage2_candidate_pool_v5_20260610/val_candidate_sets_repaired.csv",
+      "outputs/evaluation.local_bak_20260612/stage2_candidate_pool_v5_20260610/val_candidate_sets_repaired.csv"
+    ],
+    "test_candidates": [
+      "outputs/evaluation/stage2_candidate_pool_v5_20260610/test_candidate_sets_repaired.csv",
+      "outputs/evaluation.local_bak_20260612/stage2_candidate_pool_v5_20260610/test_candidate_sets_repaired.csv"
+    ],
+    "train_family_labels": [
+      "data/interim/generative/stage2_family_dataset/route_method_stratified_family_v3_20260610/train_family_labels.csv",
+      "data/interim.local_bak_20260612/generative/stage2_family_dataset/route_method_stratified_family_v3_20260610/train_family_labels.csv"
+    ],
+    "validation_family_predictions": [
+      "runs/stage2/family_predictor_route_method_stratified_v3_20260610/val_family_predictions.csv",
+      "runs.local_bak_20260612/stage2/family_predictor_route_method_stratified_v3_20260610/val_family_predictions.csv"
+    ],
+    "test_family_predictions": [
+      "runs/stage2/family_predictor_route_method_stratified_v3_20260610/test_family_predictions.csv",
+      "runs.local_bak_20260612/stage2/family_predictor_route_method_stratified_v3_20260610/test_family_predictions.csv"
+    ],
+    "precursor_ontology": [
+      "data/interim/ontology/precursor_ontology_v4_20260610/precursor_ontology.csv",
+      "data/interim.local_bak_20260612/ontology/precursor_ontology_v4_20260610/precursor_ontology.csv"
+    ],
+    "method_templates": [
+      "data/interim/templates/stage2_method_precursor_templates_v5_20260610/method_precursor_templates.csv",
+      "data/interim.local_bak_20260612/templates/stage2_method_precursor_templates_v5_20260610/method_precursor_templates.csv"
+    ]
+  },
+  "expansion": {
+    "budgets": [50, 200, 500],
+    "grid": {
+      "preserve_base_top": [20],
+      "family_per_element": [2],
+      "rare_per_element": [1],
+      "max_generated_per_sample": [40]
+    },
+    "default_preserve_base_top": 20,
+    "family_top_n": 3,
+    "rare_count_threshold": 3,
+    "max_set_size": 8,
+    "max_cartesian_products": 80,
+    "require_element_coverage": true,
+    "chemistry_constraints": {
+      "max_missing_elements": 0,
+      "max_extra_source_elements": 0
+    }
+  },
+  "validation_gate": {
+    "max_exact1_drop_pp": 0.5,
+    "require_oracle_improvement_any_budget": true,
+    "bootstrap_iterations": 1000,
+    "ci": 0.95,
+    "random_seed": 42,
+    "run_test_only_if_pass": true
+  },
+  "selector": {
+    "allow_update": false
+  }
+}

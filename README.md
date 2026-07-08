@@ -1,181 +1,169 @@
 # Synthmind
 
-Synthmind is a synthesis-route prediction utility suite for inorganic materials. It helps turn structure descriptions into inference-ready POSCAR inputs, organize SynPred route-prediction outputs, and generate polished synthesis-process reports for review.
+Synthmind is the public code release of the SynPred structure-to-synthesis workflow for inorganic materials.  It contains the calculation code for precursor-set prediction, synthesis-condition/process-pool prediction, route assembly, confidence/QC post-processing, and final route ranking.
 
-This public repository is a lightweight release package. It includes reusable code, examples, and documentation, but intentionally excludes training data, model checkpoints, private inference outputs, generated reports, and local credentials.
+This repository intentionally excludes training datasets, model checkpoints, private inference outputs, generated reports, logs, and machine credentials.  To reproduce trained predictions you need to supply the corresponding data/model artifacts under the paths expected by the configs, or override those paths in your own config.
 
-## What It Does
-
-Synthmind supports a practical structure-to-synthesis workflow:
-
-1. Convert `*_three_tasks.json` structure/task outputs into POSCAR files.
-2. Run route prediction in a SynPred model environment that has the trained checkpoints.
-3. Collect `final_top_routes_with_condition_confidence.csv` route tables.
-4. Build a Word report summarizing predicted precursors, conditions, confidence, QC warnings, and suggested experimental validation steps.
-
-The generated routes are model suggestions, not experimental SOPs. Safety review, phase validation, and domain expert inspection are required before any laboratory use.
-
-## Repository Contents
+## What Is Included
 
 ```text
 .
-├── examples/
-│   └── report_manifest.example.csv
+├── synpred/                         # Reusable research modules
+│   └── research/                    # Candidate pools, schemas, splits, metrics, attribution
+├── research/                        # YAML/JSON experiment specs and candidate-budget configs
 ├── scripts/
-│   ├── figures/
-│   │   └── make_figure3_heldout_performance.py
-│   └── reporting/
-│       ├── build_synthesis_report.py
-│       ├── json_three_tasks_to_poscar.py
-│       └── json_three_tasks_to_symmetry_poscar.py
-├── .gitignore
-├── README.md
+│   ├── 00_refine/                   # Raw synthesis-record refinement and normalization
+│   ├── 01_split/                    # Group/task split construction
+│   ├── 02_features/                 # Structure/condition feature tables
+│   ├── 03_data/                     # Stage2/Stage3/Stage35 dataset and candidate builders
+│   ├── 03_graph/                    # CGCNN/ALIGNN/CHGNet graph caches and embeddings
+│   ├── 04_train/                    # Stage2, Stage3, Stage35 model training code
+│   ├── 06_eval/                     # Candidate-pool, calibration, route-stack evaluation
+│   ├── 07_infer/                    # Full structure-to-synthesis inference pipelines
+│   ├── 08_auto_improve/             # Diagnostic and improvement experiments
+│   ├── 09_remote_autodl/            # Remote execution helper scripts without credentials
+│   ├── 10_autorun/                  # Long-run training/evaluation queues
+│   ├── 11_paper/                    # Paper/table/figure generation helpers
+│   ├── 12_research/                 # Additional research training entry points
+│   ├── reporting/                   # DOCX/POSCAR reporting utilities
+│   └── figures/                     # Figure utilities
+├── docs/                            # Pipeline and method documentation
+├── tests/                           # Lightweight research-module tests
+├── examples/                        # Small manifest examples
 └── requirements.txt
 ```
 
-### Reporting Scripts
+## Pipeline Overview
 
-- `scripts/reporting/json_three_tasks_to_symmetry_poscar.py`  
-  Converts pyxtal-style `*_three_tasks.json` structure descriptions into symmetry-expanded POSCAR files using `pymatgen`.
+The main inference pipeline is:
 
-- `scripts/reporting/json_three_tasks_to_poscar.py`  
-  Converts `*_three_tasks.json` files into reduced-formula POSCAR files without symmetry expansion. Use this as a fallback when symmetry expansion is not desired or `pymatgen` is unavailable.
+1. Structure input preparation from POSCAR files.
+2. Structural descriptors and graph embeddings.
+3. Stage2 precursor candidate generation:
+   GFlowNet sampling, composition constraints, retrieval augmentation, fallback completion, baseline ensemble candidates, and element-aware reranking.
+4. Stage3 process/condition prediction:
+   precursor-conditioned temperature, time, atmosphere, and condition-distribution estimates.
+5. Stage35 route construction and ranking:
+   readable route table generation, display filtering, rule/learned reranking where artifacts exist, route confidence, precursor QC, condition support, and final recommended-route export.
 
-- `scripts/reporting/build_synthesis_report.py`  
-  Builds a DOCX synthesis-route report from three-task JSON files and SynPred route CSV outputs.
+The primary entry point is:
 
-### Figure Script
+```bash
+python scripts/07_infer/structure_to_synthesis_route/pipeline/run_pipeline.py \
+  --config scripts/07_infer/structure_to_synthesis_route/pipeline/configs/full_route_stage3.yaml \
+  --project_root "$(pwd)" \
+  --infer_name demo_poscar_test
+```
 
-- `scripts/figures/make_figure3_heldout_performance.py`  
-  Generates held-out performance figures from existing evaluation artifacts. It reads metrics from local output directories and does not embed private performance data.
+For precursor-set prediction only:
+
+```bash
+python scripts/07_infer/structure_to_synthesis_route/pipeline/run_pipeline.py \
+  --config scripts/07_infer/structure_to_synthesis_route/pipeline/configs/precursor_only.yaml \
+  --project_root "$(pwd)" \
+  --infer_name demo_poscar_test
+```
+
+Expected POSCAR layout:
+
+```text
+data/infer/<infer_name>/poscars/
+  case_001/POSCAR
+  case_002/POSCAR
+```
+
+Main outputs are written under:
+
+```text
+outputs/inference/<infer_name>/
+```
+
+including `final_recommended_routes.csv`, `final_recommended_routes.md`, precursor-only recommendations, route QC tables, confidence layers, and a pipeline manifest when the required model artifacts are present.
+
+## Training And Evaluation Code
+
+The repository includes the complete training/evaluation source code, but not the private training data or trained artifacts:
+
+- Stage2 precursor models:
+  `scripts/04_train/stage2/`
+- Stage3 condition/process models:
+  `scripts/04_train/stage3/`
+- Stage35 route-ranker models:
+  `scripts/04_train/stage35/`
+- Candidate-pool and calibration evaluation:
+  `scripts/06_eval/`
+- End-to-end training orchestration:
+  `scripts/run_prepare_training_data.sh`,
+  `scripts/run_train_models.sh`,
+  `scripts/run_stage2_stage3_benchmark.sh`,
+  `scripts/run_full_pipeline.sh`
+
+These scripts expect training data in `data/` and model outputs in `runs/`; both directories are ignored by Git.
 
 ## Installation
 
-Create a clean Python environment:
+Create a fresh environment:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install -e .
 ```
 
-For the symmetry-expanded POSCAR converter, `pymatgen` is required. The reduced POSCAR converter and DOCX report builder use lighter dependencies.
+GPU training and CHGNet/torch inference should be installed according to the CUDA version of the target machine.  CPU-only smoke checks can still validate imports and many data-processing scripts.
 
-## Input Format
+## Model/Data Artifacts
 
-The reporting utilities expect `*_three_tasks.json` files with this shape:
+The public repository does not contain:
 
-```json
-{
-  "structure_description": "14 |7.589,5.301,12.036,90.00,119.00,90.00| ...",
-  "description_source": "pyxtal",
-  "results": [
-    {"task": "synthesis", "output": "True"},
-    {"task": "method", "output": "solid_state"},
-    {"task": "precursor", "output": "['SiO2', 'SO3']"}
-  ]
-}
-```
+- raw or refined training datasets
+- graph caches and feature matrices
+- `runs/` model checkpoints or serialized estimators
+- private `outputs/` inference/evaluation results
+- generated DOCX/PDF/PNG/TGZ artifacts
+- credentials, SSH keys, API keys, or machine-local config
 
-The report builder also expects one prediction CSV per structure, usually exported by the SynPred route pipeline:
+Typical artifact paths referenced by the configs include:
 
 ```text
-<key>_final_top_routes_with_condition_confidence.csv
+data/interim/...
+runs/stage2/...
+runs/stage3/...
+runs/stage35/...
+outputs/inference/...
 ```
 
-Required route CSV columns include:
+Copy or regenerate those artifacts locally before running trained inference.  The pipeline records missing optional rankers as degraded steps; required model/data files must exist for the corresponding enabled stages.
 
-- `final_route_rank`
-- `precursor_set`
-- `temperature_c`
-- `time_h`
-- `pred_atmosphere`
-- `route_confidence_score`
-- `route_confidence_level`
-- `condition_distribution_support_score`
-- `condition_distribution_confidence_level`
-- `condition_distribution_recommendation_status`
-- `precursor_qc_level`
-- `precursor_qc_status`
-- `precursor_qc_warnings`
+## Utilities
 
-## Generate POSCAR Inputs
+The `scripts/reporting/` utilities remain available for the earlier three-structure report workflow:
 
-Symmetry-expanded POSCAR generation:
+- `json_three_tasks_to_symmetry_poscar.py`
+- `json_three_tasks_to_poscar.py`
+- `build_synthesis_report.py`
+
+These utilities are separate from the main algorithm pipeline and are useful for preparing POSCAR inputs or writing DOCX summaries from route CSV outputs.
+
+## Verification
+
+Run lightweight checks:
 
 ```bash
-python scripts/reporting/json_three_tasks_to_symmetry_poscar.py \
-  data/infer/my_batch/poscars \
-  /path/to/A_three_tasks.json \
-  /path/to/B_three_tasks.json
+python -m py_compile \
+  scripts/07_infer/structure_to_synthesis_route/pipeline/run_pipeline.py \
+  scripts/07_infer/structure_to_synthesis_route/pipeline/src/*.py \
+  synpred/research/*.py
+
+pytest tests
 ```
 
-Reduced-formula POSCAR generation:
+Full end-to-end prediction requires the excluded model/data artifacts.
 
-```bash
-python scripts/reporting/json_three_tasks_to_poscar.py \
-  data/infer/my_batch/poscars \
-  /path/to/A_three_tasks.json
-```
+## Safety Note
 
-Example output layout:
-
-```text
-data/infer/my_batch/poscars/
-  A/POSCAR
-  B/POSCAR
-```
-
-## Run Route Prediction
-
-This repository does not include trained SynPred models. Run inference in the private or production environment that contains the route-prediction pipeline and checkpoints.
-
-For best isolation, run each target structure as its own inference case when downstream candidate merging is known to de-duplicate globally by `precursor_set`. Then collect the final route CSV for each structure.
-
-## Build a DOCX Report
-
-Create a manifest CSV with three columns:
-
-```csv
-key,json_path,prediction_csv
-ExampleMaterial,/absolute/path/to/ExampleMaterial_three_tasks.json,/absolute/path/to/ExampleMaterial_final_top_routes_with_condition_confidence.csv
-```
-
-Then run:
-
-```bash
-python scripts/reporting/build_synthesis_report.py \
-  --manifest examples/report_manifest.example.csv \
-  --output reports/synthesis_report.docx
-```
-
-You can also use directory discovery when files follow the expected names:
-
-```bash
-python scripts/reporting/build_synthesis_report.py \
-  --json-dir /path/to/jsons \
-  --prediction-dir /path/to/prediction_csvs \
-  --output reports/synthesis_report.docx
-```
-
-## Data and Model Policy
-
-The following are intentionally excluded from Git:
-
-- training datasets
-- model checkpoints and serialized estimators
-- intermediate inference outputs
-- generated DOCX/PDF/PNG reports
-- local credentials and machine-specific paths
-
-The `.gitignore` is configured to keep those artifacts out of the public repository.
-
-## Limitations
-
-- Synthmind outputs are predictive recommendations, not validated recipes.
-- Some precursor suggestions may trigger QC warnings, such as missing target elements, extra non-target elements, or elemental precursor use.
-- Route confidence and condition support are internal model diagnostics, not experimental validation.
-- Any route involving reactive, volatile, corrosive, toxic, oxidizing, reducing, or pressure-generating species must be reviewed before laboratory use.
+Synthmind produces predictive synthesis-route recommendations, not validated laboratory procedures.  Any suggested precursor, temperature, time, atmosphere, solvent, or process route must be reviewed by domain experts before experimental use.
 
 ## License
 

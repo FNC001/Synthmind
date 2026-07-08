@@ -1,0 +1,708 @@
+02_build_cgcnn_graph_cache_stage3.py 详细讲解
+===================================================
+
+一、脚本的总体定位
+------------------
+
+一句话总结：
+这个脚本的作用是为 stage3 任务构建 CGCNN 风格的图缓存。它会从 stage3 的 split JSONL 文件中读取样本，解析 POSCAR，构建周期晶体的原子图，并把 stage3 相关的目标字段（温度、时间、时间分桶、气氛、溶剂、合成类型）一起打包保存为 .pkl 图缓存，供后续 stage3 图模型训练或图表征导出使用。
+
+它在整体流程中的位置大致是：
+
+stage3 split JSONL
+  ↓
+02_build_cgcnn_graph_cache_stage3.py
+  ↓
+cgcnn_stage3/<train_mode>/
+  ├─ train.pkl
+  ├─ val.pkl
+  ├─ test.pkl
+  ├─ gold_train_holdout.pkl
+  └─ summary.json
+  ↓
+后续 CGCNN 模型训练 / embedding 导出
+  ↓
+stage3_*_graph_embed.csv（如果后续存在导出脚本）
+  ↓
+可能继续接 hybrid 或 stage3 图模型
+
+因此，这个脚本是 stage3 图路线中的数据准备步骤，不是最终 embedding 导出步骤。
+
+------------------------------------------
+二、它和 stage2 图缓存脚本的关系
+------------------------------------------
+
+这个脚本与前一个 `01_build_cgcnn_graph_cache.py` 很像，但两者面向的任务不同。
+
+1. 01_build_cgcnn_graph_cache.py
+- 面向 stage2
+- 主要输出前驱体多标签监督信号 y
+- 更偏向“图结构 + 前驱体标签”的缓存格式
+
+2. 02_build_cgcnn_graph_cache_stage3.py
+- 面向 stage3
+- 输出的是多个工艺条件相关目标
+- 更偏向“图结构 + 多种 stage3 目标”的缓存格式
+
+可以简单理解为：
+
+stage2 图缓存
+= 图结构 + 前驱体标签
+
+stage3 图缓存
+= 图结构 + 工艺条件目标
+
+两者都属于图神经网络数据准备，但监督目标不同。
+
+------------------------------------------
+三、脚本在 stage3 流程中的作用
+------------------------------------------
+
+在表格路线中，stage3 可能会经过：
+- 01_build_structdesc_features.py
+- 02_reprocess_stage3_targets.py
+- 04_build_stage3_task_views.py
+
+而在图路线中，`02_build_cgcnn_graph_cache_stage3.py` 则承担了另一条支线的任务：
+
+把 stage3 数据转换成图模型可以直接消费的缓存格式。
+
+因此，这个脚本的重要性在于：
+它为 stage3 提供了“结构图输入 + 目标标签”的统一打包形式。
+
+------------------------------------------
+四、脚本的输入与输出
+------------------------------------------
+
+1. 输入目录
+默认：
+/Users/wyc/MP_exp_doi/data/interim/splits/structdesc_splits
+
+它会从该目录中读取这些文件：
+- stage3_train.jsonl
+- stage3_val.jsonl
+- stage3_test.jsonl
+- stage3_gold_train_holdout.jsonl
+
+注意：
+train 用哪一个文件，实际上还取决于 train_mode。
+
+2. 输出目录
+如果没有显式指定 --output_dir，则默认输出到：
+
+base_dir / "interim" / "graph_cache" / "cgcnn_stage3" / train_mode
+
+例如：
+/Users/wyc/MP_exp_doi/data/interim/graph_cache/cgcnn_stage3/relaxed_only
+
+因此，不同 train_mode 会对应不同输出子目录。
+
+3. 输出文件
+通常包括：
+- train.pkl
+- val.pkl
+- test.pkl
+- gold_train_holdout.pkl
+- summary.json
+
+每个 .pkl 文件都是一个图样本列表，每条样本包含图结构与 stage3 目标。
+
+------------------------------------------
+五、train_mode 的意义
+------------------------------------------
+
+这个脚本的一个关键特征是：
+它不是固定读取某一套 train 数据，而是根据 train_mode 决定 train split 用哪个文件。
+
+支持的 train_mode 有：
+- relaxed_only
+- gold_only
+- curriculum_phase1
+- curriculum_phase2
+
+这说明作者已经把不同训练策略直接融入到了图缓存构建阶段。
+
+------------------------------------------
+六、split 路径选择：select_split_paths
+------------------------------------------
+
+函数：
+select_split_paths(input_dir, train_mode)
+
+作用：
+根据 train_mode 返回 train / val / test / gold_train_holdout 四个 split 对应的 JSONL 路径。
+
+规则如下：
+
+1. relaxed_only
+train = stage3_train.jsonl
+
+2. gold_only
+train = stage3_gold_train_holdout.jsonl
+
+3. curriculum_phase1
+train = stage3_train.jsonl
+
+4. curriculum_phase2
+train = stage3_gold_train_holdout.jsonl
+
+而 val/test/gold_train_holdout 的路径固定为：
+- val = stage3_val.jsonl
+- test = stage3_test.jsonl
+- gold_train_holdout = stage3_gold_train_holdout.jsonl
+
+因此，这个函数的作用就是：
+在图缓存构建阶段，把不同训练模式需要的 train 集定义清楚。
+
+------------------------------------------
+七、基础工具函数
+------------------------------------------
+
+1. ensure_dir(path)
+递归创建目录。
+
+2. write_json(path, obj)
+把对象写成 JSON 文件，主要用于输出 summary.json。
+
+3. read_json(path)
+读取普通 JSON 文件。
+
+4. read_jsonl(path)
+读取 JSONL 文件，每一行解析成一个 dict。
+
+5. normalize_list_like(v)
+把各种“列表样式”的输入统一转换成 Python list[str]。
+
+它支持：
+- 原本就是 list
+- JSON 字符串形式的 list
+- 逗号分隔字符串
+- 分号分隔字符串
+- 单个字符串
+
+这个函数在这里主要用于：
+规范化 main_precursors 字段。
+
+其意义是：
+即使输入 row 中的 main_precursors 格式不统一，最终写入缓存时也能变成规范的字符串列表。
+
+------------------------------------------
+八、周期平移向量：SHIFT_VECS
+------------------------------------------
+
+脚本定义了：
+
+SHIFT_VECS = [[i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)]
+
+也就是 27 个周期平移向量。
+
+这一步的目的是：
+在构建周期材料邻接图时，考虑中心晶胞及周围 26 个镜像晶胞，从而正确处理周期边界条件。
+
+这和 stage2 图缓存脚本中的思路是一致的。
+
+------------------------------------------
+九、元素映射：symbol_to_atomic_number
+------------------------------------------
+
+函数：
+symbol_to_atomic_number(sym)
+
+作用：
+将化学元素符号映射为原子序数。
+
+例如：
+- H -> 1
+- O -> 8
+- Fe -> 26
+- Ni -> 28
+
+如果遇到未知元素，则报错。
+
+这一函数说明：
+节点特征中至少保留了原子序数这一信息。
+
+------------------------------------------
+十、POSCAR 解析：parse_poscar
+------------------------------------------
+
+函数：
+parse_poscar(path)
+
+作用：
+读取 POSCAR 文件，并将其转换为图构建需要的结构信息。
+
+解析过程包括：
+
+1. 读取所有非空行
+2. 解析 scale
+3. 解析 3×3 晶格矩阵 lattice
+4. 读取元素 species 和 counts
+5. 检查 species 与 counts 数量是否一致
+6. 判断是否有 Selective Dynamics
+7. 判断坐标模式是 Direct 还是 Cartesian
+8. 读取坐标行
+9. 如果输入是 Cartesian，则转换为分数坐标
+10. 计算 cart_coords = frac @ lattice
+11. 扩展 species 到每个原子
+12. 将每个原子符号映射成 atomic_numbers
+
+最终返回的 dict 包括：
+- lattice
+- frac_coords
+- cart_coords
+- species
+- atomic_numbers
+- nsites
+
+这个函数是整个图路线的基础，因为只有先把 POSCAR 结构解析成数值数据，后面才能构建邻接图。
+
+------------------------------------------
+十一、邻接图构建：build_neighbor_graph
+------------------------------------------
+
+函数：
+build_neighbor_graph(lattice, frac_coords, radius=8.0, max_num_nbr=12)
+
+作用：
+为周期结构构建 CGCNN 风格的原子邻接图。
+
+输入：
+- lattice：晶格矩阵
+- frac_coords：分数坐标
+- radius：邻接半径
+- max_num_nbr：每个中心原子最多保留多少个邻居
+
+输出：
+- edge_src
+- edge_dst
+- edge_dist
+
+逻辑如下：
+
+1. 对每个中心原子 i
+初始化一个邻居列表 nbrs
+
+2. 对每个候选原子 j
+枚举 j 在 27 个周期镜像下的位置：
+(fj + shift) - fi
+
+3. 将这些分数坐标差转换成笛卡尔坐标差
+并计算距离 dists
+
+4. 对于每一个候选距离 d：
+- 如果 i == j 且 d < 1e-8，则视为自身，不保留
+- 如果 d <= radius，则作为合法邻居候选
+
+5. 将所有候选邻居按距离排序
+并保留前 max_num_nbr 个
+
+6. 保存边：
+j -> i
+
+因此，最终得到的图是一个：
+“每个原子从周围最近邻原子接收消息”的图结构。
+
+与 stage2 版相比，这里的实现更直接地用三重循环组织，但本质目标是相同的：在周期边界条件下构建局域近邻图。
+
+------------------------------------------
+十二、目标提取辅助函数：first_present
+------------------------------------------
+
+函数：
+first_present(row, keys)
+
+作用：
+按顺序在 row 中尝试多个候选键，找到第一个存在且不为 None 的值。
+
+这在 stage3 中很实用，因为不同版本的 stage3 表可能会用不同名字保存同一目标，例如：
+- target_temperature_c_clean
+- target_temperature_c
+- temperature_c_clean
+- temperature_c
+
+通过这个函数，可以让图缓存脚本兼容不同版本的数据来源。
+
+------------------------------------------
+十三、stage3 目标提取：build_stage3_targets
+------------------------------------------
+
+函数：
+build_stage3_targets(row)
+
+这是这个脚本最体现 stage3 特征的部分。
+
+它从每条样本 row 中抽取以下目标：
+
+1. target_temperature_c
+候选优先级：
+- target_temperature_c_clean
+- target_temperature_c
+- temperature_c_clean
+- temperature_c
+
+2. target_time_h
+候选优先级：
+- target_time_h_clean
+- target_time_h
+- time_h_clean
+- time_h
+
+3. target_time_bucket
+候选优先级：
+- target_time_bucket
+- time_bucket
+
+4. target_atmosphere
+候选优先级：
+- target_atmosphere_coarse
+- target_atmosphere
+- atmosphere_coarse
+- atmosphere
+
+注意：
+这里会优先使用 coarse atmosphere。
+
+5. target_solvent
+候选优先级：
+- target_solvent_clean
+- target_solvent
+- solvent_clean
+- solvent
+
+6. synthesis_type
+候选优先级：
+- synthesis_type
+- target_synthesis_type
+
+最终输出统一的目标字典：
+- target_temperature_c
+- target_time_h
+- target_time_bucket
+- target_atmosphere
+- target_solvent
+- synthesis_type
+
+这说明：
+无论前面 stage3 数据是经过了 clean 化、coarse 化，还是保留原始字段，这个脚本都尽量能统一抽取出一套稳定目标。
+
+------------------------------------------
+十四、单个 split 的图缓存构建：process_split
+------------------------------------------
+
+函数：
+process_split(split_name, rows, out_path, radius, max_num_nbr, max_sites)
+
+作用：
+对某个 split（例如 train）中的所有样本，逐条解析结构、构图、抽取目标，并最终写成一个 .pkl 文件。
+
+其流程如下：
+
+1. 初始化统计量
+包括：
+- dropped_missing_poscar
+- dropped_bad_poscar
+- dropped_too_many_sites
+- n_has_temperature
+- n_has_time
+- n_has_time_bucket
+- n_has_atmosphere
+- n_has_solvent
+
+2. 遍历 rows 中每一条样本
+
+对每条样本：
+
+(1) 检查 poscar_path
+如果缺失或文件不存在，则计入 dropped_missing_poscar
+
+(2) 调用 parse_poscar()
+若解析失败，则计入 dropped_bad_poscar
+
+(3) 检查 nsites
+若大于 max_sites，则计入 dropped_too_many_sites
+
+(4) 调用 build_neighbor_graph() 构图
+
+(5) 调用 build_stage3_targets() 提取目标
+
+(6) 如果对应目标非空，则更新计数：
+- n_has_temperature
+- n_has_time
+- n_has_time_bucket
+- n_has_atmosphere
+- n_has_solvent
+
+(7) 构造缓存样本 dict
+包含：
+- id
+- material_id
+- formula
+- doi
+- split_group
+- main_precursors
+- atomic_numbers
+- frac_coords
+- lattice
+- edge_src
+- edge_dst
+- edge_dist
+- target_temperature_c
+- target_time_h
+- target_time_bucket
+- target_atmosphere
+- target_solvent
+- synthesis_type
+
+3. 将 kept 列表写出到 out_path（pickle）
+
+4. 返回统计信息
+
+因此，这个函数是真正的“stage3 图样本打包器”。
+
+------------------------------------------
+十五、缓存样本里包含了什么
+------------------------------------------
+
+每条写入 .pkl 的样本，实际上包含了三类信息：
+
+1. 样本身份信息
+- id
+- material_id
+- formula
+- doi
+- split_group
+
+2. 图输入信息
+- atomic_numbers
+- frac_coords
+- lattice
+- edge_src
+- edge_dst
+- edge_dist
+
+3. stage3 监督目标和上下文
+- main_precursors
+- target_temperature_c
+- target_time_h
+- target_time_bucket
+- target_atmosphere
+- target_solvent
+- synthesis_type
+
+这说明：
+这个缓存不是单纯的图结构文件，而是一个“图结构 + stage3 目标打包”的训练样本集合。
+
+------------------------------------------
+十六、主程序：main()
+------------------------------------------
+
+main() 的流程比较直接：
+
+1. 解析命令行参数
+包括：
+- base_dir
+- input_dir
+- output_dir
+- train_mode
+- radius
+- max_num_nbr
+- max_sites
+
+2. 确定输出目录
+如果给了 output_dir，就使用它；
+否则自动使用：
+base_dir/interim/graph_cache/cgcnn_stage3/<train_mode>
+
+3. 创建输出目录
+
+4. 调用 select_split_paths() 选择 split 文件
+
+5. 读取各 split 的 JSONL 行列表
+
+6. 对每个 split 调用 process_split()
+并将结果写出为：
+- train.pkl
+- val.pkl
+- test.pkl
+- gold_train_holdout.pkl
+
+7. 将整体 summary 写出为 summary.json
+
+因此 main() 的作用是：
+把整个 stage3 图缓存构建流水线串起来。
+
+------------------------------------------
+十七、summary.json 的意义
+------------------------------------------
+
+脚本最后会写出一个 summary.json。
+其中通常包含：
+
+1. config
+记录运行参数，例如：
+- base_dir
+- input_dir
+- output_dir
+- train_mode
+- radius
+- max_num_nbr
+- max_sites
+
+2. split_paths
+记录实际使用的：
+- train
+- val
+- test
+- gold_train_holdout
+路径
+
+3. splits
+记录每个 split 的统计信息，例如：
+- input_rows
+- kept
+- dropped_missing_poscar
+- dropped_bad_poscar
+- dropped_too_many_sites
+- n_has_temperature
+- n_has_time
+- n_has_time_bucket
+- n_has_atmosphere
+- n_has_solvent
+- output_pkl
+
+这个 summary 很有价值，因为它能帮助你快速判断：
+- stage3 哪个 split 构图成功率高不高
+- POSCAR 缺失问题严不严重
+- 某些 stage3 目标覆盖率是否太低
+- gold_train_holdout 是否足够大
+
+------------------------------------------
+十八、这个脚本与 hybrid 的关系
+------------------------------------------
+
+这是理解这个脚本时非常重要的一点。
+
+这个脚本输出的是：
+- train.pkl
+- val.pkl
+- test.pkl
+- gold_train_holdout.pkl
+
+也就是：
+图缓存（graph cache）
+
+而 `05_build_hybrid_features.py` 需要的是：
+- stage3_train_graph_embed.csv
+- stage3_val_graph_embed.csv
+- stage3_test_graph_embed.csv
+等图 embedding CSV
+
+所以这两步不是同一步。
+
+正确关系应该是：
+
+02_build_cgcnn_graph_cache_stage3.py
+  ↓
+生成 stage3 图缓存 .pkl
+  ↓
+后续图模型前向传播 / embedding 导出脚本
+  ↓
+生成 stage3_*_graph_embed.csv
+  ↓
+05_build_hybrid_features.py
+  ↓
+生成 hybrid.csv
+
+也就是说：
+这个脚本虽然是图路线中必要的一步，但还不是接 hybrid 之前的最后一步。
+
+------------------------------------------
+十九、你什么时候需要先跑它
+------------------------------------------
+
+如果你的目标是：
+- 做 stage3 的 CGCNN 图模型训练
+- 导出 stage3 的 graph embedding
+- 最终构建 stage3 hybrid features
+
+那么你需要先跑它。
+
+一个典型命令（如果你的路径是 SynPred）可能是：
+
+python 02_build_cgcnn_graph_cache_stage3.py \
+  --base_dir /Users/wyc/SynPred/data \
+  --input_dir /Users/wyc/SynPred/data/interim/splits/structdesc_splits \
+  --train_mode relaxed_only \
+  --output_dir /Users/wyc/SynPred/data/interim/graph_cache/cgcnn_stage3/relaxed_only
+
+如果你不提供 --output_dir，则会按 train_mode 自动落到默认目录中。
+
+------------------------------------------
+二十、这个脚本的价值
+------------------------------------------
+
+这个脚本的核心价值主要体现在：
+
+1. 让 stage3 能走图神经网络路线
+不再局限于表格描述符，而是直接使用晶体结构图。
+
+2. 将结构图与多个工艺目标一起打包
+为后续多任务学习或单任务训练提供统一输入格式。
+
+3. 支持 train_mode-aware 的训练缓存选择
+可以适配 relaxed_only、gold_only、curriculum 等训练策略。
+
+4. 保留清晰的统计信息
+方便分析数据损失与目标覆盖率。
+
+------------------------------------------
+二十一、局限与注意点
+------------------------------------------
+
+1. 这不是 embedding 导出脚本
+跑完之后还需要后续模型前向，才能得到 graph_embed.csv。
+
+2. target_atmosphere 优先 coarse
+如果你原本想保留最细粒度 atmosphere，要注意这里默认优先选 coarse 版本。
+
+3. 仍然依赖 poscar_path 的可用性
+如果 split JSONL 中 poscar_path 不存在或路径不对，会直接丢样本。
+
+4. 大结构会被过滤
+默认 max_sites = 256。
+如果你的结构很大，可能会被排除。
+
+5. 它不会做标签编码
+例如 time_bucket、atmosphere、solvent、synthesis_type 仍然是原始文本或原始值，后续训练脚本还需进一步处理。
+
+------------------------------------------
+二十二、最简版结论
+------------------------------------------
+
+02_build_cgcnn_graph_cache_stage3.py 的核心作用就是：
+
+为 stage3 构建 CGCNN 风格图缓存。
+
+它完成了四件关键事情：
+
+1. 根据 train_mode 选择 stage3 训练 split
+2. 解析 POSCAR 并构建周期晶体邻接图
+3. 提取 stage3 的目标字段（温度、时间、时间桶、气氛、溶剂、合成类型）
+4. 将图结构和目标一起打包保存为 .pkl
+
+但必须注意：
+
+它输出的是 graph cache，而不是 graph embedding CSV。
+
+因此，它通常是：
+“stage3 图路线中的前半段”，
+后面仍需通过模型前向导出 embedding，才能进一步接 hybrid 或 embedding-based 建模。
+
+------------------------------------------
+二十三、可直接引用的简短说明
+------------------------------------------
+
+可以将该脚本概括为：
+
+该脚本用于为 stage3 数据构建 CGCNN 风格图缓存。它从 stage3 的 split JSONL 文件中读取样本，解析 POSCAR 结构文件，在周期边界条件下构建原子邻接图，并同时抽取温度、时间、时间分桶、气氛、溶剂和合成类型等 stage3 目标字段，最终将每个 split 的图样本打包保存为 .pkl 文件，以便后续进行 stage3 图模型训练或图表征导出。

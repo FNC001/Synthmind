@@ -1,14 +1,15 @@
 cff-version: 1.2.0
 title: Synthmind
-message: "If you use this utility suite, please cite the repository."
+message: "If you use this synthesis-prediction codebase, please cite the repository."
 type: software
 authors:
   - family-names: Honglin
 repository-code: "https://github.com/FNC001/Synthmind"
-abstract: "Utilities for preparing structure inputs, organizing SynPred synthesis-route predictions, and generating DOCX synthesis-process reports."
+abstract: "Codebase for inorganic-material synthesis prediction, including precursor-set generation, process/condition prediction, route assembly, confidence/QC layers, and route ranking."
 keywords:
   - materials discovery
   - synthesis prediction
   - inorganic materials
-  - POSCAR
+  - precursor prediction
+  - route ranking
   - SynPred

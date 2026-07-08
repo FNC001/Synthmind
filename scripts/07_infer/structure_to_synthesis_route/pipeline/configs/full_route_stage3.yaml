@@ -1,0 +1,219 @@
+pipeline_name: full_route_stage3_v3
+infer_name: demo_poscar_test
+project_root: .
+device: cpu
+stage3_reference_refresh:
+  enabled: false 
+  run_v34_discovery: false 
+  backup_existing: true
+  dry_run: false
+  no_v32: true
+  no_v34_discovered: true
+  gap_closure:
+    enabled: true
+    force: false
+    run_v44_stage3_feature_npz_regeneration:
+      enabled: true
+    run_v45_real_stage3_export_from_v44:
+      enabled: true
+    run_v45b_normalize_v45_candidates:
+      enabled: true
+    run_v45b_register_patch:
+      enabled: false
+    run_v48_global_clip_flow_export:
+      enabled: true
+    run_v49_merge_and_realign_all_gap_cases:
+      enabled: true
+    run_v50_final_gap_closure_report:
+      enabled: true
+  gap_recovery:
+    enabled: true
+    force: false
+    run_v41_feature_regeneration_readiness:
+      enabled: true
+    run_v42_recover_structure_sources_from_mp_json:
+      enabled: true
+    run_v43_reconstruct_poscar_from_mp_json:
+      enabled: true
+    run_v43b_validate_recovered_poscar:
+      enabled: true
+    run_v44_stage3_feature_npz_regeneration:
+      enabled: true
+build_v36_target_aware_stage2_candidates:
+  enabled: true
+run_v37_stage3_input_preflight:
+  enabled: true
+run_v37_stage3_export_interface_plan:
+  enabled: True 
+run_v38_stage3_feature_source_audit:
+  enabled: True
+run_v39_stage3_input_feature_extension_construction:
+  enabled: True
+
+stage3_partial_recovery:
+  enabled: true
+  run_export: true
+  normalize_patch: true
+  merge_and_realign: true
+  use_fixed_interface: true
+  export_backend: flow
+  allow_partial: true
+
+paths:
+  poscar_dir: '{project_root}/data/infer/{infer_name}/poscars'
+  work_dir: '{project_root}/data/interim/infer/{infer_name}'
+  out_dir: '{project_root}/outputs/inference/{infer_name}'
+steps:
+  make_infer_split: true
+  build_structdesc: true
+  build_chgnet_embedding: true
+  finalize_graph_embedding: true
+  build_stage2_features: true
+  build_stage2_npz: true
+  sample_stage2_gflownet: true
+  constrain_stage2_by_composition: true
+  summarize_stage2: true
+  add_composition_fallback: true
+  retrieve_stage2_candidates: true
+  predict_stage2_baseline: true
+  merge_stage2_sources: true
+  rerank_stage2_by_elements: true
+  fix_stage2_global_rank: true
+  build_stage3_features: true
+  build_stage3_conditioned_table: true
+  run_stage3_flow: false
+  run_stage3_lgbm: true
+  compare_stage3_models: false
+  summarize_routes: true
+  filter_display_routes: true
+  stage35_rule_rerank: true
+  stage35_learned_rerank: true
+  stage35_v21_rerank: true
+  best_route_per_precursor: true
+  export_final_top_routes: true
+  export_precursor_qc: true
+  export_confidence: true
+  build_joint_route_features: true
+  apply_v3_joint_route_rerank: true
+  add_condition_distribution_confidence: true
+  add_v43_template_features: true
+  finalize_recommended_routes: true
+  export_final_report_v3: true
+  build_v3_learned_ranker_dataset: true
+  apply_v3_learned_ranker: true
+  export_final_report: true
+  final_report_top_n: 10
+  add_v43_route_template_features: true
+  apply_v43_template_ranker: true
+  apply_v43_safe_strict_gate: true
+stage2:
+  gflownet_run_dir: '{project_root}/runs/stage2/gflownet_joint_rerank_hybrid_gold_only_v1'
+  gflownet_ckpt: '{stage2.gflownet_run_dir}/best_model.pt'
+  template_dir: '{project_root}/data/interim/generative/stage2_gflownet_dataset/hybrid/gold_only'
+  precursor_vocab_json: '{project_root}/data/interim/graph_cache/chgnet_stage2/precursor_vocab.json'
+  n_samples: 200
+  temperature: 1.2
+  top_k: 50
+  batch_size: 128
+  summary_top_n: 100
+  sampler_mode: composition_biased
+  target_hit_bonus: 6.0
+  extra_element_penalty: 1.0
+  no_overlap_penalty: 6.0
+  stop_bias: -2.0
+  ignore_elements:
+  - H
+  - O
+  seed: 42
+composition_constraint:
+  min_coverage: 0.0
+  coverage_weight: 20.0
+  extra_penalty_weight: 5.0
+  rank_weight: 0.01
+  top_n_per_sample: 100
+  drop_zero_overlap: false
+fallback:
+  top_n: 20
+retrieval:
+  top_k: 50
+  min_similarity: 0.0
+  label_threshold: 0.5
+baseline:
+  model: '{project_root}/runs/stage2/extratrees_multilabel_hybrid_gold_only_v1/stage2_extratrees_multilabel.joblib'
+  top_k_labels: 12
+  top_k_sets: 30
+  min_prob: 0.02
+  max_set_size: 4
+element_rerank:
+  top_n: 30
+  coverage_weight: 20.0
+  extra_penalty_weight: 5.0
+  rank_weight: 0.01
+graph:
+  cgcnn_checkpoint: '{project_root}/runs/graph_models/cgcnn_stage2_multilabel/best_cgcnn_stage2.pt'
+  cgcnn_model_py: '{project_root}/scripts/03_graph/train_cgcnn_stage2.py'
+  cgcnn_model_class: CGCNNStage2Model
+  max_sites: 300
+stage3:
+  schema_json: '{project_root}/data/interim/generative/stage3_condition_dataset/hybrid_mixed_v1/schema.json'
+  flow_ckpt: '{project_root}/runs/stage3/condition_mixture_flow_hybrid_mixed_v1_yset_conditioned_v2/best_stage3_condition_mixture_flow_mixed.pt'
+  flow_script: '{project_root}/scripts/04_train/stage3/mixed/train_condition_mixture_flow_mixed.py'
+  top_k_conditions: 5
+  n_flow_samples: 64
+  seed: 42
+stage3_lgbm:
+  temp_model_dir: '{project_root}/runs/stage3/lgbm_quantile_ensemble_v2_fulldata'
+  time_model_dir: '{project_root}/runs/stage3/lgbm_quantile_ensemble_v2_fulldata'
+  atm_model: '{project_root}/runs/stage3/lgbm_atmosphere_classifier_v1/model_atmosphere_binary_final.txt'
+  time_bucket_model: '{project_root}/runs/stage3/lgbm_time_bucket_classifier_v1/model_time_bucket.txt'
+display:
+  top_n: 30
+  min_temperature_c: 300
+  max_temperature_c: 1600
+  min_time_h: 0.1
+  max_time_h: 240
+stage35:
+  top_n: 30
+  rule_script: '{project_root}/scripts/07_infer/structure_to_synthesis_route/19_stage35_rule_route_rerank.py'
+  learned_script: '{project_root}/scripts/07_infer/structure_to_synthesis_route/20_stage35_learned_route_rerank.py'
+  learned_model: '{project_root}/runs/stage35/route_ranker_hybrid_mixed_v1/stage35_route_ranker.joblib'
+  v21_script: '{project_root}/scripts/07_infer/structure_to_synthesis_route/route_ranker/07_apply_stage35_route_ranker_v21_hybrid.py'
+  v21_model: '{project_root}/runs/stage35/route_ranker_v2_hybrid_mixed_v1/stage35_route_ranker_v2_extratrees.joblib'
+  v21_feature_cols: '{project_root}/runs/stage35/route_ranker_v2_hybrid_mixed_v1/stage35_route_ranker_v2_feature_cols.json'
+  best_per_precursor_script: '{project_root}/scripts/07_infer/structure_to_synthesis_route/19b_select_best_route_per_precursor.py'
+stage35_v43:
+  enabled: true
+  script_dir: scripts/07_infer/structure_to_synthesis_route/route_ranker/v43_template_aware
+  model_path: runs/stage35/route_ranker_v43_template_aware/stage35_v43_template_pairwise_chemonly_extratrees.joblib
+  feature_cols_json: runs/stage35/route_ranker_v43_template_aware/stage35_v43_template_pairwise_chemonly_feature_cols.json
+  input_csv_name: final_top_routes_v3_learned_reranked.csv
+  feature_csv_name: synthesis_routes_stage35_v43_template_features.csv
+  output_csv_name: final_top_routes_v43_template_chemonly_reranked.csv
+  output_md_name: final_top_routes_v43_template_chemonly_reranked.md
+  summary_json_name: final_top_routes_v43_template_chemonly_reranked_summary.json
+  top_n: 30
+reliability:
+  precursor_qc:
+    enabled: true
+  route_confidence:
+    enabled: true
+  condition_distribution_confidence:
+    enabled: true
+  condition_diversity_audit:
+    enabled: true
+  qc_confidence_postprocess:
+    enabled: true
+  audit_final_recommended_routes:
+    enabled: true
+  stage2_retrieval_audit:
+    enabled: true
+  attach_stage3_condition_reference_support:
+    enabled: true
+    reference_csv: data/interim/references/stage3_condition_reference/current/stage3_condition_reference.csv
+  final_report:
+    enabled: true
+final:
+  top_n: 30
+  report_top_n: 10
+v3_learned_ranker_model_path: outputs/inference/_merged_v3_learned_ranker/model_smoke_test/v3_learned_ranker_regressor.joblib
+v3_learned_ranker_feature_cols_json: outputs/inference/_merged_v3_learned_ranker/model_smoke_test/v3_learned_ranker_used_feature_cols.json

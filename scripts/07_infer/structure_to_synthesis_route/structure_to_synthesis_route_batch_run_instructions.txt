@@ -1,0 +1,418 @@
+Structure-to-Synthesis Route 批量运行说明
+========================================
+
+1. 程序整体功能
+----------------
+该程序用于对一批晶体结构文件 POSCAR 进行自动化合成路径推测。整体流程包括：
+
+输入 POSCAR 结构
+→ 单结构 pipeline 推理
+→ Stage2 前驱体组合预测
+→ Stage3 合成条件预测
+→ Stage35/V43 路线重排序
+→ route-level 置信度分级
+→ batch-level 结果汇总
+→ reliability 可靠性检查
+→ 最终结构-路径-证据表输出
+
+最终输出会回答：
+
+- 每个结构的化学式是什么？
+- 推荐的合成前驱体组合是什么？
+- 该合成路径是如何获得的？
+- 对应评分是多少？
+- 路线置信等级如何？
+- 是否需要人工复核？
+
+
+2. 输入文件准备
+----------------
+批量输入 POSCAR 放在：
+
+/Users/wyc/SynPred/data/infer/batch_500_poscars/
+
+推荐每个结构一个文件夹，格式如下：
+
+batch_500_poscars/
+├── sample_000001/
+│   └── POSCAR
+├── sample_000002/
+│   └── POSCAR
+├── sample_000003/
+│   └── POSCAR
+...
+
+每个 POSCAR 建议为标准 VASP5 格式：
+
+第 6 行：元素符号
+第 7 行：元素数量
+
+例如：
+
+Li Fe P O
+2 1 1 4
+
+程序会从 POSCAR 中自动解析：
+
+target_formula
+target_elements
+target_natoms
+
+
+3. 第一层：批量主推理
+----------------------
+进入目录：
+
+cd /Users/wyc/SynPred/scripts/07_infer/structure_to_synthesis_route/batch_adaptive
+
+运行完整批量推理：
+
+python run_adaptive_batch_pipeline.py \
+  --config configs/batch_500.yaml \
+  --mode run_and_audit
+
+如果只想测试前几个结构：
+
+python run_adaptive_batch_pipeline.py \
+  --config configs/batch_500.yaml \
+  --mode run_and_audit \
+  --limit 5
+
+如果只想跑某一个结构：
+
+python run_adaptive_batch_pipeline.py \
+  --config configs/batch_500.yaml \
+  --mode run_and_audit \
+  --case_id_filter case_000001_sample_000001_POSCAR \
+  --force
+
+第一层输出目录：
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/
+
+核心输出：
+
+master_status.csv
+master_status_standard.csv
+batch_report.md
+cases/
+logs/
+
+其中 master_status_standard.csv 是每个结构的 case-level 状态汇总。
+
+
+4. 第二层：一键后处理与可靠性检查
+----------------------------------
+完成第一层后，推荐直接运行总入口：
+
+cd /Users/wyc/SynPred/scripts/07_infer/structure_to_synthesis_route
+
+bash run_batch_full_stack.sh /Users/wyc/SynPred batch_500 5 dry_run
+
+参数含义：
+
+第 1 个参数：PROJECT_ROOT
+第 2 个参数：BATCH_NAME
+第 3 个参数：每个结构导出的 top N 路线
+第 4 个参数：reliability 模式，dry_run 或 execute
+
+常用命令：
+
+bash run_batch_full_stack.sh /Users/wyc/SynPred batch_500 5 dry_run
+
+如果后续确认要执行恢复动作：
+
+bash run_batch_full_stack.sh /Users/wyc/SynPred batch_500 5 execute
+
+
+5. run_batch_full_stack.sh 做了什么
+-----------------------------------
+这个总 shell 会串联两个模块：
+
+STEP 1: batch_adaptive 后处理
+STEP 2: batch_reliability 可靠性闭环
+
+内部逻辑是：
+
+run_batch_full_stack.sh
+│
+├── batch_adaptive/run_export_and_dispatch.sh
+│   ├── export_batch_recommendations.py
+│   ├── dispatch_recovery_cases.py
+│   ├── refine_review_required_routes.py
+│   ├── build_compact_batch_overview.py
+│   ├── inspect_failed_cases.py
+│   ├── export_manual_review_cases.py
+│   └── build_final_structure_route_evidence_table.py
+│
+└── batch_reliability/run_batch_reliability_pipeline.py
+    ├── 01_audit_layer1_outputs.py
+    ├── 02_stage3_feature_source_audit.py
+    ├── 03_build_stage3_input_extension.py
+    ├── 04_recover_missing_structures.py
+    ├── 05_validate_recovered_poscars.py
+    ├── 06_regenerate_stage3_npz.py
+    ├── 07_reexport_stage3_conditions.py
+    ├── 08_normalize_recovered_candidates.py
+    ├── 09_condition_clipping_diagnostic.py
+    ├── 10_global_clip_reexport.py
+    ├── 11_merge_recovered_results.py
+    └── 12_build_batch_closure_report.py
+
+
+6. 最终主结果在哪里
+--------------------
+最重要的最终交付表在：
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/final_delivery/
+
+核心文件：
+
+final_structure_route_evidence_table.csv
+final_structure_route_evidence_table.md
+final_structure_route_evidence_summary.txt
+
+最重要的是：
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/final_delivery/final_structure_route_evidence_table.csv
+
+这个表包含：
+
+case_id
+input_poscar
+target_formula
+target_elements
+target_natoms
+route_rank_within_case
+precursor_set
+route_refined_status
+route_refined_reason
+final_recommendation_score
+stage35_v43_safe_strict_score
+real_stage3_condition_reference_support_score
+condition_distribution_support_score
+final_recommendation_status
+final_case_status
+refined_case_status
+route_source
+route_generation_method
+score_interpretation
+evidence_summary
+needs_manual_review
+
+它是最终给别人看的主表。
+
+
+7. 其他重要输出目录
+--------------------
+7.1 高/中可信路线全集
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/route_splits/
+
+重点文件：
+
+route_recommended_high_medium.csv
+route_recommended_high_medium.md
+route_split_summary.md
+
+其中 route_recommended_high_medium.csv 是所有高可信和中可信路线的全集。
+
+
+7.2 批量总览
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/batch_compact_overview/
+
+重点文件：
+
+compact_overview_report.md
+compact_watchlist.csv
+compact_top_routes.csv
+case_status_summary.csv
+refined_case_status_summary.csv
+route_status_summary.csv
+
+其中 compact_overview_report.md 用于快速查看整个 batch 的统计结果。
+
+
+7.3 人工检查结果
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/manual_review/
+
+重点文件：
+
+manual_review_cases.csv
+manual_review_cases.md
+manual_review_routes.csv
+manual_review_routes.md
+manual_review_summary.md
+
+这里保存需要人工复核的结构和路线。
+
+
+7.4 失败或跳过结构检查
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/failed_case_inspection/
+
+重点文件：
+
+failed_cases_inspection.md
+failed_cases_inspection.csv
+
+例如纯 O、纯 H/O 的结构会被标记为：
+
+unsupported_target_elements
+
+这类结构没有有效目标元素，因此不会生成合成路径。
+
+
+7.5 第二层可靠性报告
+
+/Users/wyc/SynPred/outputs/batch_reliability/batch_500/
+
+核心文件：
+
+/Users/wyc/SynPred/outputs/batch_reliability/batch_500/gap_closure_report/gap_closure_report.md
+
+这个文件用于说明后处理闭环、异常 case、恢复计划和可靠性检查结果。
+
+
+8. 查询某一个结构的合成信息
+-----------------------------
+如果想查看某一个结构对应的合成路径，使用：
+
+cd /Users/wyc/SynPred/scripts/07_infer/structure_to_synthesis_route/batch_adaptive
+
+按 case_id 查询：
+
+python scripts/query_structure_synthesis_info.py \
+  --project_root /Users/wyc/SynPred \
+  --batch_name batch_500 \
+  --query case_000001_sample_000001_POSCAR
+
+按 POSCAR 文件名关键词查询：
+
+python scripts/query_structure_synthesis_info.py \
+  --project_root /Users/wyc/SynPred \
+  --batch_name batch_500 \
+  --query sample_000001
+
+按化学式查询：
+
+python scripts/query_structure_synthesis_info.py \
+  --project_root /Users/wyc/SynPred \
+  --batch_name batch_500 \
+  --query Zn1In2Se4
+
+查询结果输出到：
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/structure_query/
+
+例如：
+
+structure_synthesis_info__sample_000001.csv
+structure_synthesis_info__sample_000001.md
+
+如果某个结构没有合成路径，查询脚本也会显示原因，例如：
+
+unsupported_target_elements
+target_has_only_ignored_elements
+skip_route_prediction
+
+
+9. 当前评分含义
+----------------
+最终表里的评分不是实验验证结果，而是模型内部排序与一致性分数。
+
+主要包括：
+
+final_recommendation_score
+  综合推荐分数，用于最终排序。
+
+stage35_v43_safe_strict_score
+  Stage35/V43 safe-strict 路线重排序分数，反映路线整体合理性。
+
+real_stage3_condition_reference_support_score
+  Stage3 条件参考支持分数，表示预测条件与已学习条件分布的一致性。
+
+condition_distribution_support_score
+  条件分布支持分数，作为 Stage3 条件合理性的辅助指标。
+
+route_refined_status
+  路线级别置信标签，包括：
+
+route_high_confidence
+route_medium_confidence
+route_low_confidence
+route_needs_manual_check
+
+推荐优先使用：
+
+route_high_confidence
+route_medium_confidence
+
+
+10. 推荐的日常运行流程
+-----------------------
+第一步：准备 POSCAR
+
+/Users/wyc/SynPred/data/infer/batch_500_poscars/
+
+第二步：运行批量推理
+
+cd /Users/wyc/SynPred/scripts/07_infer/structure_to_synthesis_route/batch_adaptive
+
+python run_adaptive_batch_pipeline.py \
+  --config configs/batch_500.yaml \
+  --mode run_and_audit
+
+第三步：运行 full-stack 后处理
+
+cd /Users/wyc/SynPred/scripts/07_infer/structure_to_synthesis_route
+
+bash run_batch_full_stack.sh /Users/wyc/SynPred batch_500 5 dry_run
+
+第四步：查看最终表
+
+open /Users/wyc/SynPred/outputs/batch_adaptive/batch_500/final_delivery/final_structure_route_evidence_table.csv
+
+或者命令行查看：
+
+head -n 20 /Users/wyc/SynPred/outputs/batch_adaptive/batch_500/final_delivery/final_structure_route_evidence_table.csv
+
+第五步：查询某个结构
+
+cd /Users/wyc/SynPred/scripts/07_infer/structure_to_synthesis_route/batch_adaptive
+
+python scripts/query_structure_synthesis_info.py \
+  --project_root /Users/wyc/SynPred \
+  --batch_name batch_500 \
+  --query sample_000001
+
+
+11. 最重要的文件总结
+---------------------
+最终主结果：
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/final_delivery/final_structure_route_evidence_table.csv
+
+批量紧凑总览：
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/batch_compact_overview/compact_overview_report.md
+
+高/中可信路线全集：
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/route_splits/route_recommended_high_medium.csv
+
+人工检查结构：
+
+/Users/wyc/SynPred/outputs/batch_adaptive/batch_500/manual_review/manual_review_cases.csv
+
+可靠性闭环报告：
+
+/Users/wyc/SynPred/outputs/batch_reliability/batch_500/gap_closure_report/gap_closure_report.md
+
+一句话总结：
+
+run_adaptive_batch_pipeline.py 负责跑模型；
+run_batch_full_stack.sh 负责导出、分流、汇总和可靠性检查；
+final_delivery/final_structure_route_evidence_table.csv 是最终主结果。

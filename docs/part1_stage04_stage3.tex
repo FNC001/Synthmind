@@ -1,0 +1,758 @@
+% =============================================================================
+% Part I — Stage 04 Stage3 条件预测模型
+% =============================================================================
+\part*{Part I \quad Stage 04 · Stage3 条件预测模型}
+\addcontentsline{toc}{part}{Part I — Stage 04 · Stage3 条件预测模型}
+
+\setcounter{section}{0}
+
+\section{背景与契约}
+
+到 Stage 03 (Data) 结束,SynPred 已经把 \texttt{stage3\_v5\_mixed} NPZ 准备好,每个 NPZ 含:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+张量 & 形状 & 含义 \\
+\midrule
+\code{x} & $(N, F)$ float32 & hybrid 特征(描述子 + GNN 嵌入)\\
+\code{y\_set} & $(N, V)$ float32 & 前驱物 multi-hot(main + aux)\\
+\code{y\_cond\_continuous} & $(N, 2)$ float32 & (温度, 时间) 标准化后 \\
+\code{y\_cond\_continuous\_mask} & $(N, 2)$ float32 & 0/1 mask \\
+\code{y\_cond\_discrete} & $(N, 2)$ int64 & (atmosphere\_coarse\_idx, synthesis\_type\_idx) \\
+\code{y\_cond\_discrete\_mask} & $(N, 2)$ float32 & 0/1 mask \\
+\code{sample\_id} & $(N,)$ object & 字符串 id \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+加上 \file{condition\_schema.json}(含 \code{continuous\_schema=\{col: \{mean, std, median\}\}}、\code{discrete\_schema=\{col: vocab[]\}}),\file{schema.json}(数据集汇总)。
+
+\textbf{Stage 04 Stage3 的契约}:
+\begin{enumerate}
+    \item \textbf{训练}:从 NPZ 读 (x, y\_set) 与目标,处理缺失,训练后保存 ckpt。
+    \item \textbf{推理}:对 (x, y\_set) 给出多套候选条件(每条样本输出 top-k,典型 k=5\textasciitilde 9),进入 Stage35 联合排序。
+\end{enumerate}
+
+下文按 \emph{Mixture Flow $\to$ LGBM $\to$ MLP/Linear/MDN} 四节展开。
+
+% --------------------------------------------------------------- §2
+\section{Mixture Residual Flow:\file{train\_condition\_mixture\_flow\_mixed.py}(1310 行)}
+
+\subsection{双阶段思路:残差解耦}
+
+模型核心思想:\textbf{先用 baseline 给条件均值,Flow 只学残差}。
+
+\begin{equation}
+\hat c = c_{\text{base}}(x, y_{\text{set}}) + \Delta c, \qquad \Delta c \sim p_\theta(\cdot \mid x, y_{\text{set}})
+\end{equation}
+
+为什么这样设计?Stage3 的目标范围很广(温度 100--2000\,°C,时间 0.1--1000\,h),如果直接让神经网络预测分布,小数据下容易学崩。先用一个简单 baseline(Ridge/MLP/ExtraTrees 都行)给一个粗略均值,Flow 只学"baseline 没捕到的偏离"——残差范围小、分布更接近 0,Flow 容易学。
+
+类比:Boosting 的 stage-wise residual 思想,但这里残差是\textbf{分布}而非\textbf{点}。
+
+\subsection{Baseline 选择(行 264--542)}
+
+\textbf{两套 baseline 代码并存}:
+
+\paragraph{(a) \code{Stage3BaselineModel}(行 264--309)} 同一份代码里的小 MLP,作为 torch ckpt 保存。
+\begin{itemize}
+    \item \code{set\_encoder}: $V \to$ \code{set\_proj\_dim}=256
+    \item \code{trunk}: $(F + 256) \to$ \code{hidden\_dims}=$[512, 256]$
+    \item \code{disc\_heads[i]}: \code{Linear(trunk\_out, $K_i$)}
+    \item \code{cont\_head}: \code{Linear(trunk\_out, n\_cont=2)}
+\end{itemize}
+
+输出 dict:\code{\{disc\_logits: List[Tensor], cont\_pred: Tensor (B, 2)\}}。
+
+\paragraph{(b) \code{SklearnBaselineAdapter}(行 318--442)} 适配 sklearn 风格 pickle payload,常见 payload 是 \code{\{"cont\_models": [Ridge1, Ridge2], "disc\_models": [LogReg1, LogReg2], "use\_y\_set": True\}},由 \file{train\_baseline\_linear.py} 输出。\code{object.\_\_setattr\_\_} 绕过 \code{nn.Module} 的 submodule 注册——sklearn 模型不是 torch 模块。
+
+\code{load\_pickle\_baseline\_payload}(行 444+) 兼容三种文件:\file{.pkl}/\file{.pt}/\file{.joblib},并自动判断是 dict-payload(走 sklearn adapter)还是 \code{nn.Module}(走 \code{Stage3BaselineModel})。
+
+\begin{repobox}[可重复要点 \#1]
+\param{--baseline\_ckpt} 是必填参数。SynPred 推荐先用 \file{train\_baseline\_linear.py} 训一份 Ridge baseline pickle,再以此 baseline 训 Flow。如果 baseline ckpt 是 torch 形式,需要给 \param{--baseline\_hidden\_dims "512,256"} 还原结构。
+\end{repobox}
+
+\subsection{上下文编码(\code{ResidualContextEncoder},行 548--579)}
+
+\begin{lstlisting}
+y_set ─ MLP_set([V, 256]) ─┐
+                            ├── concat / add ── MLP_trunk([F+256→512→256]) ── h (B, 256)
+x ──────────────────────────┘
+\end{lstlisting}
+
+两种融合模式:
+\begin{itemize}
+    \item \param{fuse\_mode="concat"}(默认):\code{fused = cat([x, set\_repr])},trunk 输入维 $F + $ \code{set\_proj\_dim}
+    \item \param{fuse\_mode="add"}:\code{fused = x\_proj(x) + set\_repr},trunk 输入维 \code{set\_proj\_dim},需要 \code{x\_proj} 把 $F \to 256$
+\end{itemize}
+
+\code{MLP}(行 243--258)是带 LayerNorm + SiLU + Dropout 的标准 stack(可选 layernorm)。输出 \code{h} 维度 = trunk 最后一层(默认 256),叫 \code{ctx\_dim},被三个 head 共享。
+
+\subsection{Mixture-of-Gaussians 残差头(行 582--697)}
+
+\subsubsection{模型成员}
+
+\begin{lstlisting}[language=Python]
+self.gating    = MLP([ctx_dim, gating_hidden_dim=128, n_components=3])
+self.components = ModuleList([
+    MLP([ctx_dim, flow_hidden_dim=256, 2*y_cont_dim]) for _ in range(n_components)
+])
+self.resid_disc_heads = ModuleList([Linear(ctx_dim, K_i) for K_i in disc_class_sizes])
+\end{lstlisting}
+
+\param{n\_components} 默认 3(可调 5)。每个 component MLP 输出 \code{2 * y\_cont\_dim = 4} 维(2 维均值 + 2 维 log\_scale)。
+
+\subsubsection{提取分量参数(\code{\_component\_params},行 634--640)}
+
+\begin{lstlisting}[language=Python]
+gating_logits = self.gating(context)               # (B, K)
+params = stack([comp(context) for comp in components], dim=1)  # (B, K, 2*D)
+means = params[..., :D]                             # (B, K, D=2)
+log_scales = params[..., D:].clamp(-5.0, 3.0)       # 数值稳定
+\end{lstlisting}
+
+\code{log\_scales} clamp 是关键:防止 $\sigma$ 飘到 0(\code{log\_scale=-5} $\Rightarrow \sigma \approx 0.0067$)或爆炸(\code{log\_scale=3} $\Rightarrow \sigma \approx 20.1$)。
+
+\subsubsection{NLL(行 656--669)}
+
+数学上:
+\begin{equation}
+p(\Delta c \mid h) = \sum_{k=1}^K \pi_k(h)\, \mathcal{N}\!\left(\Delta c;\,\mu_k(h),\,\mathrm{diag}(\sigma_k^2(h))\right)
+\end{equation}
+\begin{equation}
+\mathcal{L}_{\text{cont}} = -\frac{1}{N}\sum_i \log p(\Delta c_i \mid h_i)
+\end{equation}
+
+对应代码:
+\begin{lstlisting}[language=Python]
+full_rows = (mask > 0.5).all(dim=1)             # 关键:只用所有 cont 维都有标签的样本
+n_valid = int(full_rows.sum().item())
+if n_valid == 0: return residual.sum()*0.0, 0
+r = residual[full_rows]
+gating_logits, means, log_scales = self._component_params(context[full_rows])
+scales = torch.exp(log_scales)
+
+diff = (r[:, None, :] - means) / clamp(scales, 1e-6)            # (B, K, D)
+log_prob_comp = -0.5 * (diff**2 + 2*log_scales + log(2*pi)).sum(-1)   # (B, K)
+log_mix = log_softmax(gating_logits, -1)                         # (B, K)
+log_prob = logsumexp(log_mix + log_prob_comp, -1)                # (B,)
+return -log_prob.mean(), n_valid
+\end{lstlisting}
+
+\textbf{关键工程决策}:\code{(mask > 0.5).all(dim=1)} ——只对\textbf{所有}连续维都有标签的样本计算 NLL。这避免温度缺失但时间存在(或反过来)时的偏差。代价是丢一部分样本。
+
+\begin{repobox}[可重复要点 \#2]
+若你想最大利用每条样本(逐维 mask),改用 \file{train\_condition\_residual\_mdn\_mixed.py:masked\_nll}(\S\ref{sec:mdn-residual}),它把 dim 维 mask 加权进 \code{log\_prob\_dim},允许部分维有标签即参与训练。这两种处理在 SynPred 数据上 MAE 差异 \textasciitilde 3\%,Flow 版本更稳但 MDN 版本利用率更高。
+\end{repobox}
+
+\subsubsection{离散头损失(行 753--761)}
+
+\begin{lstlisting}[language=Python]
+def multihead_classification_loss(logits_list, targets, class_weight_tensors, head_weights):
+    losses = []
+    for i, logits in enumerate(logits_list):
+        weight = class_weight_tensors[i] if class_weight_tensors else None
+        loss_i = F.cross_entropy(logits, targets[:, i], weight=weight)
+        losses.append(loss_i * head_weights[i])
+    return stack(losses).sum() / max(sum(head_weights), 1e-8)
+\end{lstlisting}
+
+数学上:
+\begin{equation}
+\mathcal{L}_{\text{disc}} = \frac{\sum_j w_j \cdot \mathrm{CE}(\hat y_j, y_j)}{\sum_j w_j}
+\end{equation}
+
+\code{class\_weight\_tensors} 来自 \code{build\_class\_weight\_tensor}(行 742--750):
+\begin{lstlisting}[language=Python]
+counts = bincount(y_disc[:, i], minlength=K_i)
+counts = clip(counts, 1.0, None)            # 避免 0 除
+w = counts.sum() / counts                   # 频率倒数
+w = w / w.mean()                            # 归一化均值=1
+\end{lstlisting}
+
+即\textbf{按 $1/\text{freq}$ 加权}。开关 \param{--use\_class\_weights} 控制。SynPred 默认 ON,因为 atmosphere 的类别极不均衡(\code{air\_or\_oxidizing} 占 \textasciitilde 70\%)。
+
+\subsubsection{离散头的 baseline + residual 拼接(行 887)}
+
+\textbf{关键}:Mixture Flow 的离散头不直接给 logits,而是给"残差 logits",最终 logits = baseline\_logits + residual\_logits:
+\begin{lstlisting}[language=Python]
+final_disc_logits = [b + r for b, r in zip(base_disc_logits, out["resid_disc_logits"])]
+loss_disc = multihead_classification_loss(final_disc_logits, y_disc, ...)
+\end{lstlisting}
+
+这是把"残差解耦"思想从连续头扩展到离散头——baseline 给 prior logits,Flow 学修正。
+
+\subsection{推理采样(行 678--697)}
+
+\subsubsection{\code{top1\_residual} —— 确定性中位数}
+
+\begin{lstlisting}[language=Python]
+gating_logits, means, _ = self._component_params(context)
+top_idx = argmax(gating_logits, dim=1)
+return means[arange(B), top_idx]               # (B, D)
+\end{lstlisting}
+
+取\textbf{门控最高分量的均值}作为 top-1 预测。这是 Stage3 主线 metric \code{top1\_continuous\_mean\_mae\_raw} 的依据。
+
+\subsubsection{\code{sample\_continuous} —— 随机采样 N 条}
+
+\begin{lstlisting}[language=Python]
+gating_logits, means, log_scales = self._component_params(context)
+probs = softmax(gating_logits, -1)
+cat = Categorical(probs=probs)
+comp_idx = cat.sample((n_samples,))            # (S, B) 每样本独立采分量
+
+gather_idx = comp_idx[..., None, None].expand(S, B, 1, D)
+chosen_means = gather(means_rep, 2, gather_idx).squeeze(2)
+chosen_log_scales = gather(log_scales_rep, 2, gather_idx).squeeze(2)
+
+eps = randn_like(chosen_means)
+return chosen_means + exp(chosen_log_scales) * eps    # (S, B, D)
+\end{lstlisting}
+
+两步采样:
+\begin{enumerate}
+    \item 按 gating prob 抽 component。
+    \item 在该分量上 reparameterize $\mu + \sigma \epsilon$。
+\end{enumerate}
+
+\textbf{注意}:每条样本、每次采样都独立采 component,\textbf{不固定为 top-1 分量}——这保留了多模态。
+
+\subsubsection{\code{evaluate\_split} 的 oracle metric(行 898--907)}
+
+\begin{lstlisting}[language=Python]
+sample_resid = model.sample_continuous(out["context"], n_gen_samples)   # (S, B, D)
+sample_cont = base_cont.unsqueeze(0) + sample_resid                     # (S, B, D)
+target = y_cont.unsqueeze(0).expand(S, B, D)
+mask = y_mask.unsqueeze(0).expand(S, B, D)
+sqerr = ((sample_cont - target)**2) * mask
+denom = clamp(mask.sum(2), min=1.0)
+per_sample_err = sqerr.sum(2) / denom            # (S, B)
+best_idx = argmin(per_sample_err, dim=0)         # (B,)
+oracle_cont = sample_cont[best_idx, arange(B)]   # (B, D)
+\end{lstlisting}
+
+\code{oracle\_best\_of\_k} = "如果让 oracle 在 K 个采样里挑最好的,误差是多少"——这是上限性能,反映分布质量而非 top-1 accuracy。SynPred 默认 \param{--n\_gen\_samples 8}。
+
+\subsection{标准化与逆变换(行 173--181, 921--924)}
+
+NPZ 里 \code{y\_cond\_continuous} 已经标准化(stage3 v5 mixed 在 03\_data 里做的)。Flow 学的 residual 也是标准化空间的。最终推理要回到原量纲:
+
+\begin{lstlisting}[language=Python]
+def inverse_transform_np(values, stats):
+    out = values.copy()
+    for i, st in enumerate(stats):
+        out[:, i] = out[:, i] * st["std"] + st["mean"]
+    return out
+\end{lstlisting}
+
+\code{cont\_stats} 来自 \code{condition\_schema["continuous\_schema"][col]},在训练时一并保存进 ckpt 的 \code{schema.cont\_stats},推理时从 ckpt 拿。
+
+\subsection{训练范围 clamp(\code{clip\_to\_train\_range\_fn})}
+
+\begin{lstlisting}[language=Python]
+def clip_to_train_range_fn(pred, train_min, train_max):
+    return clip(pred, train_min[None], train_max[None])
+\end{lstlisting}
+
+\param{--clip\_to\_train\_range} 默认开:推理结果 clamp 到训练集观察到的最小/最大原始量纲。这是保守做法——MoG 容易在小样本边缘外推出 5000\,°C 这种荒谬值,clip 让最差情况不至于太离谱。
+
+\code{train\_min/train\_max} 由 \code{collect\_train\_raw\_minmax}(行 799--811)在原始量纲、masked rows 上求 min/max。
+
+\subsection{训练循环(行 1132--1230)}
+
+\begin{lstlisting}[language=Python]
+for epoch in 1..epochs:
+    for batch in train_loader:
+        with torch.no_grad():
+            base_out = baseline(x, y_set)
+            base_cont = base_out["cont_pred"]
+            base_disc_logits = pad_base_disc_logits(...)
+
+        residual_target = y_cont - base_cont
+        out = model(x, y_set)
+        final_disc_logits = [b + r for b, r in zip(base_disc_logits, resid_disc_logits)]
+        loss_disc = multihead_classification_loss(final_disc_logits, y_disc, ...)
+        loss_cont, n_valid = model.nll(residual_target, out["context"], y_mask)
+        loss = loss_disc + loss_cont
+        backward + clip 5.0 + step
+
+    val_metrics = evaluate_split(baseline, model, val_loader, ...)
+    score = val_metrics["top1_continuous_mean_mae_raw"]
+    early_stopper.step(score)
+    if improved: torch.save(...)
+\end{lstlisting}
+
+\textbf{默认超参}(行 1014--1042):
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+参数 & 默认值 \\
+\midrule
+\code{hidden\_dims}          & "512,256" \\
+\code{set\_proj\_dim}         & 256 \\
+\code{flow\_hidden\_dim}      & 256 \\
+\code{n\_components}         & 3 \\
+\code{gating\_hidden\_dim}    & 128 \\
+\code{dropout}              & 0.1 \\
+\code{fuse\_mode}            & concat \\
+\code{batch\_size}           & 128 \\
+\code{epochs}               & 40 \\
+\code{patience}             & 8 \\
+\code{lr}                   & $10^{-4}$ \\
+\code{weight\_decay}         & $10^{-5}$ \\
+\code{metric\_name}          & top1\_continuous\_mean\_mae\_raw \\
+\code{n\_gen\_samples}        & 8 \\
+\code{clip\_to\_train\_range}  & True \\
+\code{grad\_clip}            & 5.0 \\
+\code{seed}                 & 42 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{repobox}[可重复要点 \#3]
+\param{metric\_name} 检查会自动识别"loss/mae/rmse/nll"系是否最小化(\code{is\_minimize\_metric},行 728--730),\code{improved} 方向自动反转。这让你切换不同 metric 时不用动 EarlyStopper 代码。
+\end{repobox}
+
+\subsection{输出文件}
+
+\begin{lstlisting}
+{run_dir}/
+├── best_stage3_condition_mixture_flow_mixed.pt  # model_state + config + schema
+├── train_log.json                                # 每 epoch 的 train_loss + val_metrics
+├── pred_train.csv / pred_val.csv / pred_test.csv  # baseline / top1 / oracle (norm + raw)
+└── final_metrics.json                             # train/val/test 三个 split 的全套指标
+\end{lstlisting}
+
+\textbf{预测 CSV 列}(\code{save\_predictions},行 814--832):
+\begin{lstlisting}
+sample_id, true_<disc>, baseline_<disc>, top1_<disc>, oracle_best_of_k_<disc>,
+true_<cont>_norm, true_<cont>_raw, mask_<cont>,
+baseline_<cont>_norm, baseline_<cont>_raw,
+top1_<cont>_norm, top1_<cont>_raw,
+oracle_best_of_k_<cont>_norm, oracle_best_of_k_<cont>_raw
+\end{lstlisting}
+
+下游可以直接对比 baseline / top1 / oracle 三档,量化 Flow 比 baseline 提升多少。
+
+% --------------------------------------------------------------- §3
+\section{LightGBM Quantile Ensemble:\file{train\_lgbm\_quantile\_ensemble.py}(436 行)}
+
+工程上,Mixture Flow 是"美的",但 LGBM 是"稳的"。SynPred 实测:LGBM 在 MAE 上比 Flow 略好(\textasciitilde 5\%),且训练时间从 30min 降到 3min,无需 GPU。配置里 \param{primary\_model=lgbm} 是默认。
+
+\subsection{任务划分}
+
+LGBM 不学一个端到端混合分布,而是把 Stage3 拆成 4 个独立任务:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+任务 & 目标 & 模型 \\
+\midrule
+温度回归 & 9 个分位数 (0.1, 0.2, \dots, 0.9) & LightGBM \code{objective="quantile"} \\
+时间回归 & 9 个分位数 & 同上 \\
+气氛分类 & 二分类(oxidizing vs non-oxidizing)& \code{objective="binary"} \\
+时间分桶分类 & 三分类(short/medium/long)& \code{objective="multiclass", num\_class=3} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+每个任务独立训、独立保存。
+
+\subsection{分位数回归}
+
+\subsubsection{Pinball loss}
+
+LightGBM \code{objective="quantile"} 用 pinball loss:
+\begin{equation}
+\rho_\tau(u) = \max(\tau u,\;(\tau-1)u) =
+\begin{cases}
+\tau u, & u \ge 0 \\
+(\tau-1)u, & u < 0
+\end{cases}
+\end{equation}
+
+对真实 $y$ 与预测 $\hat y$,损失 $\rho_\tau(y - \hat y)$ 在 $\tau$-分位数处期望最小,即 LightGBM 学到的 $\hat y$ 是条件 $\tau$-分位数 $Q_\tau(y \mid x)$。
+
+9 个分位数 $\Rightarrow$ 9 个独立模型,每个用 \code{params = \{**QUANTILE\_PARAMS, "alpha": q\}}(行 132)。\param{alpha=q} 就是 LightGBM 中的 $\tau$。
+
+\subsubsection{训练参数(行 42--55)}
+
+\begin{lstlisting}[language=Python]
+QUANTILE_PARAMS = {
+    "objective": "quantile",
+    "metric": "quantile",
+    "boosting_type": "gbdt",
+    "num_leaves": 255,
+    "learning_rate": 0.05,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "min_data_in_leaf": 20,
+    "seed": 42,
+}
+\end{lstlisting}
+
+\param{num\_leaves=255} 偏大,让模型有足够 capacity 学复杂分位数曲面。\param{feature\_fraction=0.8} + \param{bagging\_fraction=0.8} + \param{min\_data\_in\_leaf=20} 起防过拟作用。\param{num\_boost\_round=200},early stopping patience=20。
+
+\subsubsection{mask 处理(行 120--126)}
+
+\begin{lstlisting}[language=Python]
+mask_train = data["train"]["y_cond_continuous_mask"][:, target_idx] > 0.5
+X_train_m, y_train_m = X_train[mask_train], y_train[mask_train]
+\end{lstlisting}
+
+\textbf{只用有标签的行训练}——非常直白,不像 Flow 还要做"逐维 mask 加权"。代价是某些样本对温度有标签但对时间无,温度模型用它,时间模型不用,资源利用率次优但实现极简。
+
+\subsubsection{评估(行 149--178)}
+
+\begin{lstlisting}[language=Python]
+top1_pred = test_preds[0.5]                        # median 当 top-1
+mae = abs(y - top1_pred).mean()
+median_ae = median(abs(y - top1_pred))
+r2 = r2_score(y, top1_pred)
+
+# Oracle: 9 个 quantile 里挑误差最小的
+all_preds = stack([test_preds[q] for q in QUANTILES], 1)
+errors = abs(all_preds - y[:, None])
+oracle_pred = all_preds[arange(N), errors.argmin(1)]
+oracle_mae = abs(y - oracle_pred).mean()
+
+# 阈值内比例
+for thresh in [25, 50, 100, 200]:    # 温度
+    metrics[f"top1_within_{thresh}"] = (abs_err <= thresh).mean()
+\end{lstlisting}
+
+\textbf{关键工程指标}:\code{top1\_within\_50} = "预测温度误差 $\le$ 50\,°C 的比例",这比 MAE 更直接反映"工程上可用"。SynPred 实测:LGBM \code{top1\_within\_100} \textasciitilde 75\%,Flow top1 \textasciitilde 70\%。
+
+\subsection{气氛二分类 + 时间分桶三分类}
+
+\paragraph{气氛二分类(\code{train\_atmosphere\_classifier},行 181--254)}
+简化为二分类(\code{oxidizing} vs \code{inert/reducing/vacuum}):
+\begin{lstlisting}[language=Python]
+y = (df["target_atmosphere_coarse"] == "air_or_oxidizing").astype(int)
+valid = df["has_target"] > 0.5
+\end{lstlisting}
+
+不用 NPZ,从 \file{task\_views\_dir/atmosphere\_coarse\_\{train,val,test\}.csv} 读。推理时用 \code{threshold=0.6}(不是 0.5)预测正类——这是 macro\_f1 调出来的。
+
+\paragraph{时间分桶三分类(\code{train\_time\_bucket\_classifier},行 257--332)}
+\begin{lstlisting}[language=Python]
+classes = ["short", "medium", "long"]
+y = df["target_time_bucket"].map(class_map)
+
+# 关键:排除可能泄漏的连续时间列
+leak_cols = {"target_time_h_log1p", "target_time_h_clean"}
+feat_cols = [c for c in df.columns if c not in meta_cols and c not in leak_cols]
+\end{lstlisting}
+
+\textbf{反泄漏}:\code{time\_bucket} 是从 \code{target\_time\_h\_clean} 离散化得到的,如果训练特征里含 \code{target\_time\_h\_log1p} 就泄漏了。
+
+\subsection{推理时的 Quantile 优先级(\file{13b\_run\_stage3\_infer\_lgbm\_quantile.py:210})}
+
+这是 LGBM 模块最优雅的推理 trick:
+
+\begin{lstlisting}[language=Python]
+# Order: Q0.5, Q0.4, Q0.6, Q0.3, Q0.7, Q0.2, Q0.8, Q0.1, Q0.9
+quantile_priority = [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.1, 0.9]
+k = min(top_k_conditions, 9)
+
+for sample_i in range(N):
+    seen_temps = set()
+    exported = 0
+    for q in quantile_priority:
+        temp_val = temp_preds[q][i]
+        time_val = time_preds[q][i]
+
+        # clip 物理范围
+        temp_val = max(0.0, min(2000.0, temp_val))
+        time_val = max(0.0, min(5000.0, time_val))
+
+        # 按 10°C 粒度去重
+        temp_rounded = round(temp_val / 10) * 10
+        if temp_rounded in seen_temps:
+            continue
+        seen_temps.add(temp_rounded)
+
+        # score:median 1.0,向两侧线性递减
+        score = 1.0 - abs(q - 0.5) * 2.0
+
+        rows.append({...})
+        exported += 1
+        if exported >= k:
+            break
+\end{lstlisting}
+
+\textbf{优先级解读}:
+\begin{itemize}
+    \item 0.5 ← median,中位/最稳
+    \item 0.4, 0.6 ← 中等不确定的左右翼
+    \item 0.3, 0.7 ← 中等翼
+    \item 0.2, 0.8 ← 大翼
+    \item 0.1, 0.9 ← 极端翼
+\end{itemize}
+
+效果是:\textbf{先取保守(中位)估计,然后向两侧扩张}。这等价于:在不确定性范围内提供"由保守到激进"的一组候选,让下游 Stage35 排序器有多样选择。
+
+\textbf{去重}:\code{temp\_rounded = round(temp/10)*10} 让相邻分位数若预测温差 $< 10$\,°C 就合并。
+
+\textbf{score}:median 1.0,Q0.4/Q0.6 = 0.8,Q0.3/Q0.7 = 0.6, \dots, Q0.1/Q0.9 = 0.2。
+
+\subsection{命令行}
+
+\begin{lstlisting}[language=bash]
+# 训练:
+python scripts/04_train/stage3/train_lgbm_quantile_ensemble.py \
+  --project_root /Users/wyc/SynPred \
+  --num_boost_round 200 \
+  --early_stopping_rounds 20
+
+# 推理:
+python scripts/07_infer/.../13b_run_stage3_infer_lgbm_quantile.py \
+  --conditioned_x_csv .../stage3_x_with_parents.csv \
+  --schema_json       runs/stage3/lgbm_quantile_ensemble_v2_fulldata/schema.json \
+  --temp_models_dir   runs/stage3/lgbm_quantile_ensemble_v2_fulldata/temperature \
+  --time_models_dir   runs/stage3/lgbm_quantile_ensemble_v2_fulldata/time \
+  --atm_model         runs/stage3/lgbm_atmosphere_classifier_v1/model_atmosphere_binary_final.txt \
+  --time_bucket_model runs/stage3/lgbm_time_bucket_classifier_v1/model_time_bucket.txt \
+  --output_dir        runs/stage3_infer_lgbm/<view> \
+  --top_k_conditions  5
+\end{lstlisting}
+
+% --------------------------------------------------------------- §4
+\section{MLP / Linear baselines}
+
+\subsection{\file{train\_mlp\_predictor.py}(781 行)}
+
+每个连续/离散头一个独立 sklearn \code{MLPRegressor}/\code{MLPClassifier}(行 395, 437):
+\begin{lstlisting}[language=Python]
+MLPRegressor(
+    hidden_layer_sizes=(256, 128),
+    activation="relu",
+    solver="adam",
+    alpha=1e-4,                    # L2
+    learning_rate="adaptive",
+    learning_rate_init=1e-3,
+    max_iter=200,
+    early_stopping=True,
+    validation_fraction=0.1,
+    n_iter_no_change=10,
+)
+\end{lstlisting}
+
+特点:
+\begin{itemize}
+    \item \textbf{per-head 独立训练},不共享 backbone
+    \item 用 \code{StandardScaler} 标准化输入
+    \item 缺失标签的样本被 mask 掉(行 387--394)
+    \item \textbf{稀疏类别守护}(行 428--435):某离散类别 < 2 个样本时关闭 early\_stopping 防止 train/val 分裂时 val 那一类完全空
+\end{itemize}
+
+\code{fit\_report}(行 380--455)记录所有 dropped/skipped 头,便于诊断。输出 pickle 可作为 Mixture Flow 的 \param{--baseline\_ckpt}。
+
+\subsection{\file{train\_baseline\_linear.py}(499 行)}
+
+最干净对照——\textbf{Ridge + LogisticRegression 单层}:
+\begin{lstlisting}[language=Python]
+Ridge(alpha=1.0, random_state=42)                            # 连续头
+LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs")     # 离散头
+DummyClassifier(strategy="most_frequent")                    # 单类时 fallback
+\end{lstlisting}
+
+无标准化(\param{--standardize} 默认 OFF,因为 Stage 03 已经标准化过了)。\textbf{单类目标}(uniq $\le$ 1)用 \code{DummyClassifier} 代替。
+
+\begin{repobox}[可重复要点 \#4 — SynPred 推荐的 baseline 链]
+\begin{enumerate}
+    \item 先训 \file{train\_baseline\_linear.py} $\to$ 生成 Ridge baseline pickle
+    \item 再训 \file{train\_condition\_mixture\_flow\_mixed.py --baseline\_ckpt <Ridge pickle>} $\to$ Flow 学残差
+\end{enumerate}
+这种 Linear baseline + MoG 残差的组合在 SynPred 数据上比 MLP-baseline + MoG 略稳(LR 不会 overfit baseline 阶段)。
+\end{repobox}
+
+\subsection{\file{train\_condition\_residual\_mdn\_mixed.py}:同款架构但纯 MDN}
+\label{sec:mdn-residual}
+
+与 Mixture Flow 的差别:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+维度 & Mixture Flow & Residual MDN \\
+\midrule
+残差解耦 & $\checkmark$(显式 baseline)& $\checkmark$(显式 baseline)\\
+Mixture Head & \code{n\_components=3},各自 MLP & \code{MDNHead(n\_mixtures=5)},共享一层 \\
+log\_$\sigma$ clamp & $[-5, 3]$ & $[-7, 5]$(更宽)\\
+NLL 实现 & "全维都有标签才计算" & "逐维 mask 加权"(\code{masked\_nll})\\
+默认 \code{n\_components} & 3 & 5(更多模式)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\code{MDNHead} 用三个 Linear:\code{pi (in→K)}、\code{mu (in→K*D)}、\code{log\_sigma (in→K*D)}。\code{masked\_nll}(行 291--320)的精髓:
+\begin{lstlisting}[language=Python]
+log_prob_dim = -0.5*(z**2 + 2*log_sigma + log(2*pi))    # (B, K, D)
+log_prob_dim = log_prob_dim * mask * head_weights        # 逐维 mask
+valid_dim_count = (mask * head_weights).sum(-1).clamp_min(1.0)
+log_prob_comp = log_prob_dim.sum(-1) / valid_dim_count   # 平均到有效维
+log_pi = log_softmax(pi_logits, -1)
+log_mix = logsumexp(log_pi + log_prob_comp, -1)
+return -log_mix.mean()
+\end{lstlisting}
+
+允许"温度有标签但时间没有"的样本也参与训练。
+
+\subsection{模型选择参考}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+数据规模 & 推荐主力 & 理由 \\
+\midrule
+$<$ 5k 样本 & Linear baseline & 简单稳健,不容易过拟合 \\
+5k -- 20k & LGBM Quantile & 工程稳过 \\
+20k+ & Mixture Flow & 表达力强,分布更细 \\
+任意规模 & LGBM + Flow 双跑 & 候选互补,Stage35 排序自动选 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% --------------------------------------------------------------- §5
+\section{端到端复现指南}
+
+\subsection{依赖}
+
+\begin{lstlisting}[language=bash]
+pip install numpy pandas scikit-learn torch
+pip install lightgbm        # LGBM 分支需要
+\end{lstlisting}
+
+\subsection{完整管道}
+
+\begin{lstlisting}[language=bash]
+PR=/Users/wyc/SynPred
+
+# === STEP 1: 03_data 已经准备好 NPZ + condition_schema ===
+ls $PR/data/interim/generative/stage3_condition_dataset/hybrid_mixed_v1/
+# 期望: train.npz val.npz test.npz schema.json condition_schema.json export_summary.json
+
+# === STEP 2: 训练 baseline(Ridge,作为 Flow 的输入) ===
+python $PR/scripts/04_train/stage3/train_baseline_linear.py \
+  --input_dir   $PR/data/interim/generative/stage3_condition_dataset/hybrid_mixed_v1 \
+  --output_dir  $PR/runs/stage3/baseline_ridge_v1 \
+  --ridge_alpha 1.0 --logreg_C 1.0
+
+# === STEP 3: 训练 Mixture Residual Flow ===
+python $PR/scripts/04_train/stage3/mixed/train_condition_mixture_flow_mixed.py \
+  --input_dir     $PR/data/interim/generative/stage3_condition_dataset/hybrid_mixed_v1 \
+  --baseline_ckpt $PR/runs/stage3/baseline_ridge_v1/best_model.pkl \
+  --run_dir       $PR/runs/stage3/mixture_flow_v1 \
+  --hidden_dims "512,256" --set_proj_dim 256 \
+  --flow_hidden_dim 256 --n_components 3 --gating_hidden_dim 128 \
+  --dropout 0.1 --fuse_mode concat \
+  --batch_size 128 --epochs 40 --patience 8 \
+  --lr 1e-4 --weight_decay 1e-5 \
+  --metric_name top1_continuous_mean_mae_raw \
+  --use_class_weights --clip_to_train_range \
+  --n_gen_samples 8 --grad_clip 5.0 --device cuda --seed 42
+
+# === STEP 4: 训练 LGBM Quantile Ensemble ===
+python $PR/scripts/04_train/stage3/train_lgbm_quantile_ensemble.py \
+  --project_root $PR --num_boost_round 200 --early_stopping_rounds 20
+
+# === STEP 5: LGBM 推理 ===
+python $PR/scripts/07_infer/.../13b_run_stage3_infer_lgbm_quantile.py \
+  --conditioned_x_csv $PR/runs/stage3_infer/conditioned_x.csv \
+  --schema_json       $PR/runs/stage3/lgbm_quantile_ensemble_v2_fulldata/schema.json \
+  --temp_models_dir   $PR/runs/stage3/lgbm_quantile_ensemble_v2_fulldata/temperature \
+  --time_models_dir   $PR/runs/stage3/lgbm_quantile_ensemble_v2_fulldata/time \
+  --atm_model         $PR/runs/stage3/lgbm_atmosphere_classifier_v1/model_atmosphere_binary_final.txt \
+  --time_bucket_model $PR/runs/stage3/lgbm_time_bucket_classifier_v1/model_time_bucket.txt \
+  --output_dir        $PR/runs/stage3_infer/lgbm_quantile_v1 \
+  --top_k_conditions 5
+\end{lstlisting}
+
+\subsection{验收清单}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{lXl}
+\toprule
+验收点 & 命令 & 期望 \\
+\midrule
+Flow ckpt 可加载 & \code{torch.load(...)['schema']['cont\_stats']} & 有 mean/std/median \\
+Flow 训练收敛 & \code{train\_log.json} 末尾 \code{val.top1\_*\_mae\_raw} & $<$ 100\,°C(温度)\\
+Oracle vs Top-1 差距 & 相同指标 oracle / top1 比 & 0.6--0.8 \\
+LGBM temp top1\_within\_100 & metrics.json & $>$ 0.7 \\
+LGBM atm accuracy & atm\_metrics\_final.json & $>$ 0.85 \\
+推理 jsonl 格式 & \code{head -1 test\_candidates.jsonl} & 含 stage3\_score 等 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{常见坑}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{lXl}
+\toprule
+现象 & 原因 & 解 \\
+\midrule
+\code{KeyError: y\_cond\_continuous} & NPZ 是 v4(无 mixed) & 用 \file{27\_build\_stage3\_condition\_dataset\_v5\_mixed.py} 重新构 \\
+Flow loss NaN 或 inf & log\_scale 没 clamp 飞了 & 检查 clamp(-5, 3);若数据极端,降至 (-3, 2) \\
+LGBM 找不到 feature & 输入 csv 列与训练时不一致 & 重生成 conditioned\_x\_csv \\
+MLP fit 报 single class & 某离散维 train 全是同一类 & 看 fit\_report 的 dropped\_or\_skipped\_heads \\
+Flow oracle $\approx$ top1 & n\_gen\_samples 太小 & 调大 \param{--n\_gen\_samples 32} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% --------------------------------------------------------------- §6
+\section{设计哲学与可改进点}
+
+\subsection{七个工程模式}
+
+\begin{enumerate}
+    \item \textbf{残差解耦}:Flow / MDN 都用"baseline + residual"两阶段。
+    \item \textbf{混合类型分头处理}:连续(Mixture Gaussian)+ 离散(每维独立 CE,带类频权重)+ 缺失(mask 全维或逐维)。
+    \item \textbf{不重新拟合 standardizer}:Flow / MDN / LGBM 都从 NPZ 里读 \code{condition\_schema.continuous\_schema} 的 mean/std。
+    \item \textbf{Quantile Ensemble 优先级 trick}:不靠采样而靠"事先训好的多分位数",推理时按"由稳到激进"序遍历。
+    \item \textbf{train-only stats}:连续 mean/std + class weights + train\_min\_raw/max\_raw 都从 train 算。
+    \item \textbf{Schema in ckpt}:\code{best\_*.pt} 自带 disc\_class\_sizes、cont\_col\_names、cont\_stats。
+    \item \textbf{多模型并存,Stage35 自决}:LGBM + Flow + MLP 都输出统一格式 candidate JSONL。
+\end{enumerate}
+
+\subsection{可改进点}
+
+\begin{enumerate}[label=(\alph*)]
+    \item Flow 的 \code{n\_components=3} 偏小,5--7 个更合理。
+    \item LGBM Quantile 互相独立训练,单调性可能违反。可加 isotonic regression 后处理。
+    \item MDN/Flow 的 baseline 两套代码并存,可统一为 sklearn pickle 路线。
+    \item 气氛二分类丢失了 inert vs reducing 区分。
+    \item Quantile Ensemble 的 score 是粗的线性映射,可考虑用 quantile 间距估不确定度。
+    \item Mixture Flow 的离散头若 baseline 全 0 则等价纯监督,需在 ckpt 里记录 flag。
+\end{enumerate}
+
+\subsection{与同类工作的比较}
+
+\begin{center}
+\small
+\begin{tabular}{lcccc}
+\toprule
+维度 & 本实现 (Mixture Flow) & Diffusion & Normalizing Flow & Quantile Forest \\
+\midrule
+表达力 & 中(MoG)& 高 & 高 & 中 \\
+训练稳定 & 高 & 中 & 中 & 高 \\
+采样速度 & 极快 & 慢 & 中 & 快 \\
+缺失数据 & 易 & 难 & 难 & 易 \\
+可解释性 & 高 & 低 & 中 & 中 \\
+工程依赖 & torch & torch + diffusion 库 & torch + flow 库 & LightGBM \\
+\bottomrule
+\end{tabular}
+\end{center}

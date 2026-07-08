@@ -1,0 +1,28 @@
+spec_version: naming_map_v1
+public_names:
+  stage2:
+    new_id: rsp
+    class_name: RouteSkeletonProposer
+    public_name: Route Skeleton Proposer
+    compatibility_alias: stage2
+  stage3:
+    new_id: cdg
+    class_name: ConditionDistributionGenerator
+    public_name: Condition Distribution Generator
+    compatibility_alias: stage3
+  stage35:
+    new_id: grv
+    class_name: GlobalRouteVerifier
+    public_name: Global Route Verifier
+    compatibility_alias: stage35
+schema_classes:
+  - RouteSpecification
+  - RouteCandidate
+  - RouteReference
+  - CandidatePool
+versioning_rules:
+  - model_version and run_id are separate fields.
+  - metric_id must not contain model version, run id, or date.
+  - protocol, split, metric, candidate_budget, and canonicalization_version are independent fields.
+  - legacy names may remain in compatibility code and artifact paths but should not be used in new public reports.
+

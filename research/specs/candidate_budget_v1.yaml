@@ -1,0 +1,18 @@
+spec_version: candidate_budget_v1
+budget_id: candidate_budget_v1
+main_text_k: [1, 5, 10]
+appendix_only_k: [50, 100, 200, 500]
+B_skeleton: 50
+B_route: 200
+deduplication:
+  before_truncation: true
+  key: [sample_id, predicted_method, canonical_precursor_set, temperature, time, atmosphere, solvent]
+tie_break:
+  deterministic: true
+  columns: [sample_id, final_rank, grv_score, legacy_grv_score, candidate_id]
+fairness_constraints:
+  - all comparable models use identical input samples
+  - all comparable models use identical canonicalization_version
+  - all comparable models use identical candidate pool and B_route
+  - no model may gain by emitting more candidates
+

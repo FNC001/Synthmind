@@ -1,0 +1,658 @@
+% =============================================================================
+% Part II — Stage35 联合排序器
+% =============================================================================
+\part*{Part II \quad Stage35 联合排序器}
+\addcontentsline{toc}{part}{Part II — Stage35 联合排序器}
+
+\setcounter{section}{0}
+
+\section{整体架构}
+
+\subsection{一条数据的旅程}
+
+\begin{lstlisting}
+                       ┌── 03_data: candidates JSONL ──┐
+   stage2 (gflownet)   │                                │
+   stage2 (cvae)       │  N_recipe = N_target × N_p × N_c
+   stage3 (mixture)    │                                │
+   stage3 (lgbm)       │                                ▼
+                       └────────► 12_summarize_routes ──► synthesis_routes_readable.csv
+                                                          │
+                                                          ▼
+                                               14_filter_for_display
+                                                          │
+                                                          ▼  display_csv
+                                          ┌─────────────┬──────────────────┬────────────┐
+                                          │             │                  │            │
+                                  rule_rerank   learned_rerank      v21_rerank   (备用 v3 / v43)
+                                          │             │                  │            │
+                                          └────────┬────┴──────────────────┘            │
+                                                   ▼                                    │
+                                  export_final_top_routes ◄─ 优先级 v21 > learned > rule
+                                                   │                                    │
+                                                   ▼                                    ▼
+                                          final_top_routes.csv   v3_learned + v43_template_aware
+                                                   │                                    │
+                                                   └──────────────► 联合后处理 ◄──────┘
+                                                                          ▼
+                                                              final_recommended_routes.{md,csv}
+\end{lstlisting}
+
+注意:\textbf{Stage35 不重新计算特征},它读的是上游已经标好元素覆盖、警告、QC、\code{stage3\_score} 的"可读路线 CSV",在此基础上加几列 \code{stage35\_*\_score / stage35\_*\_rank} 重排。这种"sort-only + annotate"的设计让排序层完全可替换、可旁路、可叠加。
+
+\subsection{排序链定义(\file{run\_pipeline.py:24-64})}
+
+\begin{lstlisting}[language=Python]
+STEP_FUNCS = [
+    ...
+    # Stage35 sort chain
+    ("summarize_routes",          steps_stage35.summarize_routes),
+    ("filter_display_routes",     steps_stage35.filter_display_routes),
+    ("stage35_rule_rerank",       steps_stage35.stage35_rule_rerank),
+    ("stage35_learned_rerank",    steps_stage35.stage35_learned_rerank),
+    ("stage35_v21_rerank",        steps_stage35.stage35_v21_rerank),
+    ("best_route_per_precursor",  steps_stage35.best_route_per_precursor),
+    ("export_final_top_routes",   steps_final.export_final_top_routes),
+    ...
+]
+\end{lstlisting}
+
+每一步都"非破坏":新增 \code{stage35\_<X>\_score / stage35\_<X>\_rank} 列,不动既有列。下游 \code{export\_final\_top\_routes} 依次找最强可用 ranking,作为 \code{final\_route\_rank}。
+
+\subsection{配置层(\file{configs/full\_route\_stage3.yaml})}
+
+\begin{lstlisting}[language=yaml]
+stage35:
+  top_n: 30
+  rule_script:  '{project_root}/.../19_stage35_rule_route_rerank.py'
+  learned_script: '{project_root}/.../20_stage35_learned_route_rerank.py'
+  learned_model:  '{project_root}/runs/stage35/route_ranker_hybrid_mixed_v1/stage35_route_ranker.joblib'
+  v21_script:        '.../route_ranker/07_apply_stage35_route_ranker_v21_hybrid.py'
+  v21_model:         '.../runs/stage35/route_ranker_v2_hybrid_mixed_v1/stage35_route_ranker_v2_extratrees.joblib'
+  v21_feature_cols:  '.../runs/stage35/route_ranker_v2_hybrid_mixed_v1/stage35_route_ranker_v2_feature_cols.json'
+  best_per_precursor_script: '.../19b_select_best_route_per_precursor.py'
+
+stage35_v43:
+  enabled: true
+  model_path:        '.../runs/stage35/route_ranker_v43_template_aware/stage35_v43_template_pairwise_chemonly_extratrees.joblib'
+  feature_cols_json: '.../runs/stage35/route_ranker_v43_template_aware/stage35_v43_template_pairwise_chemonly_feature_cols.json'
+  ...
+\end{lstlisting}
+
+\begin{repobox}[可重复要点 \#1]
+每个排序器\textbf{模型 + 特征列 JSON} 两件套必须同时部署。脱节会导致维度不匹配 sklearn 报错;更糟的是悄悄列错位、给出有毒分数。
+\end{repobox}
+
+% --------------------------------------------------------------- §2
+\section{V21 兼容性 ExtraTrees Ranker(主力)}
+
+\subsection{训练数据}
+
+V21 训练数据来自 03\_data 的 \file{24\_build\_stage35\_hardneg\_compat\_dataset.py},$N\times 5$ 行:
+\begin{itemize}
+    \item 1 条 positive:\code{(x, true\_set)},label=1
+    \item 2 条 hard\_negative:\code{(x, modelpred\_set)}(同一目标,模型预测错的高分集合),label=0
+    \item 2 条 random\_negative:\code{(x, random\_set)}(其他目标的真值集合),label=0
+\end{itemize}
+
+\textbf{张量字段}:
+\begin{lstlisting}[language=Python]
+x_struct  : (5N, F)    结构特征(标准化前)
+precursor_y : (5N, V)  候选前驱物 multi-hot
+x_joint   : (5N, F+V)  concat([x_struct, precursor_y]),整体在 train 上拟合 mean/std 再标准化
+y         : (5N,)      0/1
+\end{lstlisting}
+
+\subsection{模型与训练}
+
+\textbf{模型}:\code{sklearn.ensemble.ExtraTreesClassifier}(joblib 序列化)。SynPred 配置:
+\begin{lstlisting}[language=Python]
+ExtraTreesClassifier(
+    n_estimators=600,           # 600 棵树
+    max_depth=None,
+    min_samples_leaf=1,
+    class_weight='balanced',    # 1:4 不均衡
+    n_jobs=-1,
+    random_state=42,
+)
+\end{lstlisting}
+
+为什么用 ExtraTrees 而非 GBDT/MLP?三点工程考量:
+\begin{enumerate}
+    \item Tree-based 对 multi-hot 输入天然友好。
+    \item 不需要标准化也能训(但 SynPred 仍标准化,因 \code{x\_struct} 与 \code{precursor\_y} 量纲差异大)。
+    \item \code{predict\_proba} 输出 $[0,1]$ 自然成为 ranker 分数。
+\end{enumerate}
+
+\subsection{推理}
+
+\begin{lstlisting}[language=Python]
+df = pd.read_csv(input_csv)
+feature_cols = json.load(open(feature_cols_json))
+X = df[feature_cols].astype(float).values
+X = (X - mean) / std
+
+clf = joblib.load(model_path)
+proba = clf.predict_proba(X)[:, 1]
+df["stage35_v2_prob"] = proba
+df["stage35_v21_score"] = proba
+df = df.sort_values(["sample_id", "stage35_v21_score"], ascending=[True, False])
+df["stage35_v21_rank"] = df.groupby("sample_id").cumcount() + 1
+\end{lstlisting}
+
+输出 csv 在原列基础上增加 \code{stage35\_v2\_prob}、\code{stage35\_v21\_score}、\code{stage35\_v21\_rank}。
+
+\subsection{V21 在 chain 里的角色}
+
+V21 是 SynPred 实测\textbf{最强单点排序器}。优势:
+\begin{itemize}
+    \item 直接学"该 (target, set) 配对是否能合成"——pointwise 二分类。
+    \item 训练数据带 hard negative,区分易混淆候选。
+    \item ExtraTrees 鲁棒。
+\end{itemize}
+
+劣势:
+\begin{itemize}
+    \item 没显式比较两条候选——pointwise,无法学 "a 比 b 好"。
+    \item 化学先验弱——只看 multi-hot,看不到"前驱物属于硝酸盐/碳酸盐路线"。
+\end{itemize}
+
+V43 就是为了补这两点。
+
+% --------------------------------------------------------------- §3
+\section{V43 Template-Aware Pairwise Ranker}
+
+\subsection{思想}
+
+\textit{"把候选路线显式分类到化学模板(nitrate / carbonate / phosphate / oxide / ...),然后学习'同目标内 a 比 b 好' 的 pairwise 偏好。"}
+
+V43 是 SynPred 中最完整的可学习排序器,分四步:
+\begin{itemize}
+    \item \textbf{01} 给路线打 template 标签(rule-based 特征工程,不改排名)
+    \item \textbf{02} 用一个弱 reward 函数 \code{compute\_template\_quality} 构造同目标的 pairwise 偏好对
+    \item \textbf{03} 训练对称化 ExtraTreesClassifier(差分输入)
+    \item \textbf{04} 全候选池 all-vs-all 推理,聚合 wins/win\_rate/mean\_prob 给最终分
+\end{itemize}
+
+\subsection{STEP 01 · Template 特征工程(\file{01\_add\_route\_template\_features.py},344 行)}
+
+\subsubsection{单个前驱物的 type 分类(\code{precursor\_type},行 65--130)}
+
+\begin{lstlisting}[language=Python]
+def precursor_type(p: str) -> set[str]:
+    s = clean_str(p)
+    compact = s.replace(" ", "")
+    types = set()
+    elems = parse_elements_from_formula(s)
+
+    # Hydrate(水合)
+    if "·" in compact or re.search(r"[·.]\d*H2O", compact):
+        types.add("hydrate")
+
+    # 阴离子家族
+    if "NO3" in compact: types.add("nitrate")
+    if "CO3" in compact: types.add("carbonate")
+    if "PO4" in compact or "P2O5" in compact: types.add("phosphate")
+    if "SO4" in compact: types.add("sulfate")
+    if "SO3" in compact: types.add("sulfite")
+    if "OH" in compact: types.add("hydroxide")
+    if "NH4" in compact: types.add("ammonium")
+
+    # Selenium 家族
+    if "SeO2" in compact or "SeO3" in compact:
+        types.add("selenite_selenate")
+    elif "Se" in elems:
+        types.add("selenide_or_elemental_se")
+
+    # Sulfide
+    if "S" in elems and not ("SO4" in compact or "SO3" in compact):
+        types.add("sulfide_or_elemental_s")
+
+    # Halogen
+    if elems & {"F","Cl","Br","I"}:
+        types.add("halide_or_elemental_halogen")
+
+    # Oxide(防止与 oxyanion 重叠)
+    oxyanion_types = {"nitrate","carbonate","phosphate","sulfate","sulfite","selenite_selenate"}
+    if "O" in elems and not (types & oxyanion_types):
+        types.add("oxide_or_oxygen_source")
+
+    # Organic
+    if "C" in elems and "H" in elems and "carbonate" not in types:
+        types.add("organic_like")
+
+    # 单元素
+    if re.fullmatch(r"[A-Z][a-z]?", compact):
+        types.add("elemental")
+
+    return types
+\end{lstlisting}
+
+工程取舍:
+\begin{itemize}
+    \item \textbf{集合而非单值}:Co(NO$_3$)$_2$·6H$_2$O 同时是 nitrate + hydrate
+    \item \textbf{互斥规则}:含 SO$_4$ 时不打 sulfide;含 oxyanion 时不打 oxide
+    \item \textbf{保守优先}:H$_2$O$_2$ 不打 hydrate(严格要求 \code{·xH2O} 写法)
+\end{itemize}
+
+\subsubsection{路线整体 template(\code{infer\_primary\_template},行 133--175)}
+
+优先级序:\textbf{离散阴离子家族(磷/硫/硫酸/碳/硝)$>$ 卤素族 $>$ 氢氧化物 $>$ 氧化物 $>$ 单元素 $>$ 有机辅助 $>$ 水合辅助}。
+
+\begin{lstlisting}[language=Python]
+priority = [
+    ("phosphate_route",  "phosphate"),
+    ("sulfate_route",    "sulfate"),
+    ("sulfite_route",    "sulfite"),
+    ("carbonate_route",  "carbonate"),
+    ("nitrate_route",    "nitrate"),
+    ("selenite_selenate_route", "selenite_selenate"),
+    ("selenide_route",   "selenide_or_elemental_se"),
+    ("sulfide_route",    "sulfide_or_elemental_s"),
+    ("halide_route",     "halide_or_elemental_halogen"),
+    ("hydroxide_route",  "hydroxide"),
+    ("oxide_route",      "oxide_or_oxygen_source"),
+    ("elemental_route",  "elemental"),
+    ("organic_assisted_route", "organic_like"),
+    ("hydrate_assisted_route", "hydrate"),
+]
+present = [name for (name, ty) in priority if type_counts[ty] > 0]
+primary = present[0]
+secondary = ";".join(present[1:])
+confidence = type_counts[priority_type] / total_typed
+\end{lstlisting}
+
+\subsubsection{输出 28 列特征}
+
+\begin{lstlisting}
+route_template_primary, route_template_secondary, route_template_confidence,
+route_template_n_types, route_template_type_signature,
+route_has_<oxide|nitrate|carbonate|phosphate|sulfate|sulfite|selenide|...|hydrate|ammonium>_template (15个 0/1),
+route_template_is_common_solid_state    # 任一离散阴离子或氢氧化物存在
+route_template_is_overly_elemental      # 单元素比例 ≥ 50% 且至少 2 个前驱物
+route_template_elemental_ratio
+route_template_matches_target_anion
+\end{lstlisting}
+
+\subsection{STEP 02 · 弱 Reward + Pairwise 数据集}
+
+\subsubsection{弱 reward 函数(\code{compute\_template\_quality},行 55--104)}
+
+完整公式:
+\begin{align}
+Q &= 4\cdot \text{cov} - 2\cdot \text{miss} - 0.25\cdot \text{extra} - 1.5\cdot \text{foreign} - 0.5\cdot \text{extra\_nontriv} \notag \\
+  &\quad - 0.6\cdot \text{warn} - 0.8\cdot \text{warn\_pen} \notag \\
+  &\quad + 0.8\cdot \text{tpl\_match} + 0.4\cdot \text{common\_solid} + 0.2\cdot \text{tpl\_conf} - 0.35\cdot \text{overly\_elem} \notag \\
+  &\quad + 0.4\cdot \text{v42\_score} + 0.2\cdot \text{v33\_prob} + 0.1\cdot \text{v32\_score}
+\end{align}
+
+各项含义:
+\begin{itemize}
+    \item \textbf{正信号}(权重最大):元素覆盖 $+4$,template 与目标阴离子匹配 $+0.8$,common\_solid\_state $+0.4$,template\_confidence $+0.2$
+    \item \textbf{负信号}:元素缺失 $-2$,多余阴离子轻罚 $-0.25$,foreign\_cation(目标里没有的金属)$-1.5$,extra\_nontrivial $-0.5$
+    \item \textbf{诊断信号}:警告数 $-0.6$,加权警告 $-0.8$,过度元素化 $-0.35$
+    \item \textbf{prior 信号}:v42 $+0.4$,v33 $+0.2$,v32 $+0.1$
+\end{itemize}
+
+\begin{repobox}[可重复要点 \#3]
+这一 reward \textbf{不是 ground truth}——SynPred 没有"实验合成成功率"的标签,是用一组化学家可解释的启发式规则模拟"哪些路线更可能成功"。这是个\textbf{弱监督}信号。
+\end{repobox}
+
+\subsubsection{同目标 pair 构造(\code{build\_pairs\_for\_group},行 120--189)}
+
+\begin{lstlisting}[language=Python]
+d_sorted = d.sort_values("route_quality_v43_weak", ascending=False)
+high_pool = d_sorted.head(min(10, n))         # top-10 候选
+low_pool  = d_sorted.tail(min(15, n))         # bottom-15 候选
+
+for a in high_pool:
+    for b in low_pool:
+        if a == b: continue
+        gap = q[a] - q[b]
+        if abs(gap) < min_quality_gap:        # default 0.25
+            continue
+        better, worse = (a, b) if gap>0 else (b, a)
+        rec = {
+            "infer_name": ..., "target_group": infer_name, "label": 1,
+            "quality_gap": abs(gap),
+            ...
+        }
+        # 关键:diff__ 特征 = better - worse
+        for c in numeric_feature_cols(d):
+            rec[f"diff__{c}"] = safe_float(better[c]) - safe_float(worse[c])
+        rows.append(rec)
+        if len(rows) >= max_pairs_per_group: break
+\end{lstlisting}
+
+\textbf{设计要点}:
+\begin{enumerate}
+    \item \param{top10 $\times$ bottom15} 而非 all-vs-all
+    \item \param{min\_quality\_gap=0.25} 过滤太接近的 pair
+    \item \code{label=1} 永远(对称化在 03 trainer 里做)
+    \item \code{diff\_\_<feature>} 差分特征
+\end{enumerate}
+
+\subsection{STEP 03 · 对称化训练(\file{03\_train\_v43\_template\_pairwise\_ranker\_chemonly.py})}
+
+\subsubsection{排除已有排序信号(行 26--48)}
+
+\begin{lstlisting}[language=Python]
+EXCLUDE_KEYWORDS = [
+    "score","prob","rank","wins","losses","win_rate","mean_prob","local_index",
+    "stage35_v21","stage35_v3","stage35_v31","stage35_v32","stage35_v33","stage35_v42",
+    "route_warning_adjusted_score","route_warning_score",
+]
+\end{lstlisting}
+
+只用化学/template 差异,不用前一代 ranker 的分数。让 V43 学到\textbf{互补}信号。
+
+\subsubsection{对称化(行 96--104)}
+
+\begin{lstlisting}[language=Python]
+X_pos = df[feature_cols].fillna(0.0).astype(float)
+y_pos = np.ones(len(X_pos), dtype=int)
+
+X_neg = -X_pos                         # 关键:翻转所有差分
+y_neg = np.zeros(len(X_neg), dtype=int)
+
+X = pd.concat([X_pos, X_neg], ignore_index=True)
+y = np.concatenate([y_pos, y_neg], axis=0)
+groups = pd.concat([df["target_group"], df["target_group"]], ignore_index=True)
+\end{lstlisting}
+
+数学上,训练样本变成:
+\begin{equation}
+\begin{cases}
+\phi(\text{better}) - \phi(\text{worse}) & \to 1 \\
+\phi(\text{worse}) - \phi(\text{better}) & \to 0
+\end{cases}
+\end{equation}
+
+学到的 $f(\Delta\phi)$ 自动具有反对称性:$f(-\Delta) \approx 1 - f(\Delta)$。这是经典 RankNet / pairwise SVM 的核心 trick。
+
+\begin{repobox}[可重复要点 \#4]
+如果不做对称化,模型可能学到"better 永远在 diff 公式左边"的虚假 pattern。对称化让 X 分布关于原点对称,迫使 f 学真实的化学差异。
+\end{repobox}
+
+\subsubsection{GroupShuffleSplit by target(行 106--111)}
+
+\begin{lstlisting}[language=Python]
+splitter = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=42)
+train_idx, test_idx = next(splitter.split(X, y, groups=groups))
+\end{lstlisting}
+
+\textbf{反泄漏}:同一 target 的所有 pair 必须整体落在 train 或 test。
+
+\subsubsection{模型(行 118--126)}
+
+\begin{lstlisting}[language=Python]
+clf = ExtraTreesClassifier(
+    n_estimators=600,
+    max_depth=12,                    # 比 V21 严格
+    min_samples_leaf=2,
+    class_weight='balanced',
+    random_state=42,
+    n_jobs=-1,
+)
+\end{lstlisting}
+
+\subsection{STEP 04 · All-vs-All 推理(\file{04\_apply\_v43\_template\_pairwise\_ranker\_chemonly.py})}
+
+\subsubsection{全候选 all-vs-all(行 84--128)}
+
+\begin{lstlisting}[language=Python]
+for g in unique_groups:
+    idx = where(groups == g)[0]
+    ng = len(idx)
+    for ii in range(ng):
+        i = idx[ii]
+        batch_rows = []; opponents = []
+        xi = X_base.iloc[i]
+        for jj in range(ng):
+            if ii == jj: continue
+            j = idx[jj]
+            xj = X_base.iloc[j]
+            diff = xi.values - xj.values   # i - j
+            batch_rows.append(diff); opponents.append(j)
+
+        X_pair = pd.DataFrame(batch_rows, columns=feature_cols)
+        prob = model.predict_proba(X_pair)[:, 1]    # P(i better than j)
+        for p, j in zip(prob, opponents):
+            prob_sum[i] += p; n_comp[i] += 1
+            if p >= 0.5:
+                wins[i] += 1; losses[j] += 1
+\end{lstlisting}
+
+每个候选 $i$ 与同 target 的 $\text{ng}-1$ 个对手比较,获得 \code{wins[i]}, \code{losses[i]}, \code{mean\_prob[i]}, \code{win\_rate[i]}。
+
+\textbf{复杂度}:$O(N \times \text{ng}^2)$,每个 target ng $\le 30$ → 900 对/target,可接受。
+
+\subsubsection{最终分数(行 134)}
+
+\begin{equation}
+\text{score}_i = 0.7 \cdot \text{mean\_prob}_i + 0.3 \cdot \text{win\_rate}_i
+\end{equation}
+
+mean\_prob 是连续信号给细排序;win\_rate 抗噪声。
+
+\subsection{V43 安全门(\file{apply\_v43\_safe\_strict\_gate.py})}
+
+把不安全候选(警告高、QC 不过关)的 v43 score 强制归零:
+
+\begin{lstlisting}[language=Python]
+unsafe_mask = (
+    (df["route_warning_level"] == "major_warning") |
+    (df["precursor_qc_level"] == "major_warning") |
+    (df["route_recommendation_status"] == "review_required")
+)
+df.loc[unsafe_mask, "v43_safe_strict_score"] = 0.0
+\end{lstlisting}
+
+% --------------------------------------------------------------- §4
+\section{V3 Learned Ranker(全局 fallback)}
+
+\subsection{角色}
+
+V21 训练数据需要"硬负例",V43 的 pairwise 数据需要"benchmark 跑过的 final\_md"。这两个都是\textbf{冷启动困难}。V3 Learned Ranker 是 fallback:直接对一份 final 候选 csv,按 rank 序生成弱标签,训一个全局 ExtraTreesRegressor。
+
+\subsection{STEP 1 · 数据集(\file{build\_v3\_learned\_ranker\_dataset.py})}
+
+\subsubsection{弱标签(行 49--79)}
+
+\begin{lstlisting}[language=Python]
+df = df.sort_values("v3_joint_rerank_rank")
+
+n = len(df)
+n_pos = int(n * 0.25)              # top 25% 为正
+n_neg = int(n * 0.35)              # bottom 35% 为负
+
+labels = np.full(n, 0.5)            # 中间 40% 为不确定
+labels[:n_pos] = 1.0
+labels[max(n-n_neg, n_pos):] = 0.0
+
+# listwise rank target
+df["v3_rank_target"] = 1.0 - (rank-1)/(n-1)
+\end{lstlisting}
+
+三档标签 (1.0 / 0.5 / 0.0) 给的是分类信号;\code{v3\_rank\_target} 给的是连续 listwise 信号。SynPred 默认用前者。
+
+\subsubsection{特征列}
+
+\begin{lstlisting}[language=Python]
+preferred_numeric = [
+    "stage35_v21_score", "stage35_v2_prob", "stage3_score",
+    "temperature_c", "time_h",
+    "element_coverage", "missing_count", "extra_element_penalty",
+    "route_confidence_score", "precursor_qc_score", "v3_joint_feature_score",
+]
+# 加上所有 v3_ 前缀的数值列(除了 leak 的)
+\end{lstlisting}
+
+V3 用\textbf{已有 ranker 的输出}作为特征——这意味着 V3 是\textbf{二阶 ranker},学的是"如何组合多个 V21/V2/V3 信号"。
+
+\subsection{STEP 2 · 训练 + 推理(\file{apply\_v3\_learned\_ranker.py})}
+
+\textbf{安全 override}(行 93--100):
+\begin{lstlisting}[language=Python]
+df["v3_learned_safety_bucket"] = df.route_recommendation_status.map({
+    "recommended": 0,
+    "recommended_with_validation": 1,
+    "review_required": 2,
+}).fillna(1)
+sort_cols = ["v3_learned_safety_bucket", "v3_learned_ranker_score"]
+\end{lstlisting}
+
+排序时\textbf{先按安全桶升序,再按 v3\_score 降序}——学习信号永远不能 override 化学安全检查。
+
+\textbf{三档分数解读}:
+\begin{itemize}
+    \item $\ge 0.78$ → \code{high\_learned\_score}
+    \item $\ge 0.50$ → \code{medium\_learned\_score}
+    \item 否则 → \code{low\_learned\_score}
+\end{itemize}
+
+% --------------------------------------------------------------- §5
+\section{Final Export 与排序链优先级(\file{steps\_final.py})}
+
+\subsection{优先级(行 23--43)}
+
+\begin{lstlisting}[language=Python]
+if "stage35_v21_csv" in r.outputs:        # 最高
+    src, source = (..._v21_csv, "stage35_v21")
+elif "stage35_learned_csv" in r.outputs:
+    src, source = (..._learned_csv, "stage35_learned")
+elif "stage35_rule_csv" in r.outputs:
+    src, source = (..._rule_csv, "stage35_rule")
+else:
+    src, source = (display_csv, "display_filtered")
+\end{lstlisting}
+
+\subsection{优先级解读}
+
+\begin{itemize}
+    \item \textbf{V21}:可学习兼容性二分类,信号最强
+    \item \textbf{learned}:旧版 learned 二分类,作为兼容性 fallback
+    \item \textbf{rule}:启发式规则得分,稳但粗
+    \item \textbf{display}:仅按 \code{stage3\_score} 排序的 raw 结果
+\end{itemize}
+
+% --------------------------------------------------------------- §6
+\section{端到端复现指南}
+
+\subsection{完整训练管道}
+
+\begin{lstlisting}[language=bash]
+PR=/Users/wyc/SynPred
+
+# === STEP 1: 训 V21 ExtraTrees ===
+python $PR/scripts/.../route_ranker/06_train_stage35_route_ranker_v21_hybrid.py \
+  --input_dir   $PR/data/interim/generative/stage35_hardneg/hybrid/relaxed_only/temperature \
+  --output_dir  $PR/runs/stage35/route_ranker_v2_hybrid_mixed_v1 \
+  --n_estimators 600 --random_state 42
+
+# === STEP 2: 跑一次 pipeline 得到 final_top_routes.csv ===
+cd $PR/scripts/07_infer/structure_to_synthesis_route/pipeline
+python run_pipeline.py --config configs/full_route_stage3.yaml --task <some_target>
+
+# === STEP 3: V43 Template-Aware Ranker ===
+# 3a) 加 template 特征
+python $PR/scripts/.../v43_template_aware/01_add_route_template_features.py \
+  --input_csv  /path/to/synthesis_routes_stage35_v33_chemonly_reranked.csv \
+  --output_csv /path/to/synthesis_routes_stage35_v43_template_features.csv \
+  --top_n 30
+
+# 3b) 构 pairwise 数据集
+python $PR/scripts/.../v43_template_aware/02_build_v43_template_pairwise_dataset.py \
+  --benchmark_name benchmark_30_clean_v2_final_shell_v11_v33 \
+  --project_root $PR \
+  --output_csv $PR/runs/stage35/route_ranker_v43_template_aware/v43_template_pairwise.csv \
+  --max_pairs_per_group 80 --min_quality_gap 0.25
+
+# 3c) 训练
+python $PR/scripts/.../v43_template_aware/03_train_v43_template_pairwise_ranker_chemonly.py \
+  --input_csv  $PR/runs/.../v43_template_pairwise.csv \
+  --output_dir $PR/runs/stage35/route_ranker_v43_template_aware \
+  --n_estimators 600 --max_depth 12 --min_samples_leaf 2 --test_size 0.25
+
+# 3d) 应用
+python $PR/scripts/.../v43_template_aware/04_apply_v43_template_pairwise_ranker_chemonly.py \
+  --input_csv  /path/to/synthesis_routes_stage35_v43_template_features.csv \
+  --model_path $PR/runs/.../stage35_v43_template_pairwise_chemonly_extratrees.joblib \
+  --feature_cols_json $PR/runs/.../stage35_v43_template_pairwise_chemonly_feature_cols.json \
+  --output_csv /path/to/synthesis_routes_stage35_v43_template_chemonly_reranked.csv \
+  --top_n 30
+
+# === STEP 4: V3 Learned Ranker ===
+python $PR/scripts/.../pipeline/scripts/build_v3_learned_ranker_dataset.py \
+  --input_csv  /path/to/final_top_routes.csv \
+  --top_positive_frac 0.25 --bottom_negative_frac 0.35
+
+# === STEP 5: 端到端 pipeline ===
+python $PR/scripts/.../pipeline/run_pipeline.py \
+  --config $PR/scripts/.../pipeline/configs/full_route_stage3.yaml
+\end{lstlisting}
+
+\subsection{常见坑}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{XXX}
+\toprule
+现象 & 原因 & 解 \\
+\midrule
+V21 推理报维度不匹配 & feature\_cols.json 与 model 不配套 & 确认两者来自同一 run \\
+V43 训练 test\_acc=1.0 & 没用 GroupShuffleSplit & 检查 \code{groups=df.target\_group} 传入 \\
+V43 推理特征对不上 & base\_cols 在 csv 里缺列 & \code{ensure\_numeric} 自动填 0 \\
+V3 score 全是 0.5 & label 全是中性 & 调小 \param{top/bottom\_frac} \\
+Final source = display\_filtered & V21/learned/rule 都缺脚本 & 检查 \code{r.cfg["stage35"]["v21\_script"]} 路径 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% --------------------------------------------------------------- §7
+\section{设计哲学与可改进点}
+
+\subsection{八个工程模式}
+
+\begin{enumerate}
+    \item \textbf{Sort + Annotate, never destroy}:每个 ranker 只新增 \code{stage35\_<X>\_score / rank} 列。
+    \item \textbf{优先级 fallback}:final export 按 v21 > learned > rule > display 选最强可用。
+    \item \textbf{配置驱动}:每个 ranker 的脚本 / 模型 / feature\_cols 三件套写在 yaml。
+    \item \textbf{Pointwise + Pairwise + Listwise 共存}:V21 (pointwise) + V43 (pairwise) + V3 (listwise) 三种范式并行,互补。
+    \item \textbf{对称化 pairwise}:迫使模型学反对称偏好。
+    \item \textbf{GroupShuffleSplit by target}:防止同目标在 train/test 间泄漏。
+    \item \textbf{Excluded keywords}:V43 显式排除既有 ranker 的 score/rank/prob 作为特征。
+    \item \textbf{Safety override 优先}:化学安全检查 > 学习排序。
+\end{enumerate}
+
+\subsection{可改进点}
+
+\begin{enumerate}[label=(\alph*)]
+    \item V21 是 pointwise 不能学 "a 和 b 都能合成,但 a 更典型"。
+    \item V43 reward 函数手工调,可用 BO 自动调权重。
+    \item V43 only-chemistry 排除了 stage35\_*\_score,丢失有价值的预测信号。可训两版集成。
+    \item V3 是 regressor 不是 classifier,可考虑 sigmoid + BCE on soft labels。
+    \item All-vs-all $O(\text{ng}^2)$,可用 Bradley-Terry 模型参数化压缩。
+    \item 没有 ListNet / LambdaRank,listwise loss 对 top-k 性能通常 +2-3 ndcg。
+    \item Safety bucket 是硬 override,可让其进 score 而非分桶。
+\end{enumerate}
+
+\subsection{与文献的对照}
+
+\begin{center}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+维度 & 本实现 & LambdaMART & XGBoost & LightGBM & RankNet \\
+\midrule
+pointwise & V21 \checkmark & $\times$ & $\times$ & $\times$ & $\times$ \\
+pairwise  & V43 \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+listwise  & $\times$ & \checkmark NDCG & \checkmark & \checkmark & $\times$ \\
+化学先验  & template-aware \checkmark & 无 & 无 & 无 & 无 \\
+模型      & ExtraTrees & GBDT & GBDT & GBDT & DNN \\
+训练数据  & 弱 reward & 真 click & 真 query & 真 query & 真 query \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+SynPred 在"无真实标签 + 化学领域知识 + 多模型集成"三点上做了独特取舍。把 chemistry 知识(template / element coverage / warnings)显式注入 reward 而非让 ranker 端到端学,牺牲了一些抽象表达力,换来\textbf{可解释、可审计、可手动修正}——这对合成路线推荐场景至关重要。

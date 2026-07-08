@@ -1,0 +1,884 @@
+01_build_structdesc_features.py 详细讲解
+==========================================
+
+一、脚本的总体定位
+------------------
+
+一句话总结：
+这个脚本的作用是把前一步已经完成 train/val/test 切分的 JSONL 样本，转换成可直接用于机器学习训练的结构描述符特征表，并分别为 stage2 和 stage3 任务构建对应的监督标签。
+
+如果把整个数据流程串起来，它大致位于下面这个位置：
+
+原始结构-合成数据
+  ↓
+严格匹配与清洗
+  ↓
+refined 数据（stage2_gold / stage2_relaxed / stage3_gold / stage3_relaxed）
+  ↓
+group split（train / val / test）
+  ↓
+01_build_structdesc_features.py
+  ↓
+结构描述符 CSV 特征表
+  ↓
+后续 stage2 / stage3 模型训练
+
+也就是说，这个脚本不是做原始数据清洗的，也不是做模型训练的，而是处在“切分之后、训练之前”的特征工程阶段。它的核心目标是把结构-合成样本转换成标准化、数值化、适合机器学习处理的表格形式。
+
+--------------------------------------------------
+二、这个脚本处理的两类任务：stage2 和 stage3
+--------------------------------------------------
+
+这个脚本同时服务两个下游任务：
+
+1. stage2
+目标通常是：根据结构描述符预测主前驱体集合。
+因此，stage2 更偏向一个多标签分类问题。
+输入是结构特征，输出是一组主前驱体标签。
+
+2. stage3
+目标通常是：根据结构描述符预测合成条件，如 atmosphere、solvent、synthesis_type，以及保留 temperature/time 这样的连续目标。
+因此，stage3 既包含分类标签，也保留连续变量，便于后续做回归或联合建模。
+
+所以这个脚本的一个重要特点是：
+它不是只做“统一特征表”，而是针对不同任务分别构造标签空间和输出表格。
+
+--------------------------
+三、脚本的输入与输出
+--------------------------
+
+1. 输入目录
+默认输入目录为：
+
+/Users/wyc/SynPred/data/interim/splits/structdesc_splits
+
+它会读取以下 8 个 JSONL 文件。
+
+Stage2：
+- stage2_train.jsonl
+- stage2_val.jsonl
+- stage2_test.jsonl
+- stage2_gold_train_holdout.jsonl
+
+Stage3：
+- stage3_train.jsonl
+- stage3_val.jsonl
+- stage3_test.jsonl
+- stage3_gold_train_holdout.jsonl
+
+这些 JSONL 文件本质上是前面 split 脚本输出的样本集合，每一行是一条结构-合成样本记录。
+
+2. 输出目录
+默认输出目录为：
+
+/Users/wyc/SynPred/data/interim/features/structdesc_features
+
+这个目录下会输出两大类东西：
+
+(1) 每个 split 对应的 raw.csv 和 ml.csv
+例如：
+- stage2_train_raw.csv
+- stage2_train_ml.csv
+- stage2_val_raw.csv
+- stage2_val_ml.csv
+- ...
+- stage3_test_raw.csv
+- stage3_test_ml.csv
+
+(2) meta 信息
+位于 meta/ 目录下：
+- element_vocab.json
+- precursor_vocab.json
+- atmosphere_vocab.json
+- solvent_vocab.json
+- synthesis_type_vocab.json
+- build_summary.json
+
+因此，这个脚本的输出既包含了真正用于训练的表格数据，也包含了标签空间和特征空间的元信息。
+
+--------------------------------
+四、脚本的主流程：总体逻辑拆解
+--------------------------------
+
+这个脚本的 main() 可以概括成以下步骤：
+
+第 1 步：读取 split 后的 JSONL 数据
+第 2 步：从训练集构建标签 vocab
+第 3 步：从所有样本构建 element vocab
+第 4 步：对每条样本提取结构描述符
+第 5 步：根据任务生成标签列
+第 6 步：输出 raw.csv / ml.csv
+第 7 步：输出 vocab 和 summary
+
+这意味着它不是简单地“把 JSON 转成 CSV”，而是进行了比较完整的特征工程和标签工程。
+
+--------------------------------
+五、基础工具函数与整体组织方式
+--------------------------------
+
+脚本内部大致可以分成以下几个模块：
+
+1. 基础元素表和元素类别定义
+2. IO 工具函数
+3. 公式组成特征
+4. summary.json 特征
+5. POSCAR 几何特征
+6. 行级特征化
+7. stage2 / stage3 标签构建
+8. split 级别处理
+9. 主程序入口
+
+这种组织方式说明作者是按“特征来源”和“任务处理方式”来模块化的，结构比较清晰。
+
+------------------------------------------
+六、元素表与元素类别：特征工程的基础字典
+------------------------------------------
+
+脚本一开始定义了一个完整的 ELEMENTS 列表，覆盖了周期表中的元素，并进一步构造了：
+
+Z_TABLE = {元素符号: 原子序数}
+
+例如：
+- H -> 1
+- Fe -> 26
+- Ni -> 28
+
+这一步的作用很重要，因为后面组成特征中的：
+- feat_z_mean
+- feat_z_std
+
+都依赖这个映射。
+
+此外，脚本还预定义了若干元素类别集合，例如：
+- ALKALI（碱金属）
+- ALKALINE（碱土金属）
+- HALOGENS（卤素）
+- CHALCOGENS（氧族）
+- LANTHANOIDS（镧系）
+- ACTINOIDS（锕系）
+- TRANSITION_METALS（过渡金属）
+
+这些集合的作用是后面计算不同类别元素的比例，例如：
+- feat_frac_tm
+- feat_frac_alkali
+- feat_frac_chalcogen
+
+因此，这部分实际上是在为“基于元素类别的统计特征”提供底层字典支持。
+
+----------------------------
+七、IO 与路径处理机制
+----------------------------
+
+1. read_jsonl(path)
+作用：
+读取 JSONL 文件，把每一行解析成一个 Python dict，并返回 list[dict]。
+
+这是本脚本读取输入 split 文件的基础。
+
+2. write_json(path, obj)
+作用：
+将 Python 对象写成格式化 JSON 文件。
+
+主要用于保存：
+- vocab 文件
+- build_summary.json
+
+3. ensure_dir(path)
+作用：
+如果目录不存在则创建目录。
+用于保证输出目录和 meta 目录存在。
+
+4. resolve_path(maybe_rel_path, base_dir)
+这个函数很关键。
+
+它的逻辑是：
+给定一个可能是相对路径的文件地址，依次尝试以下候选路径：
+
+- 直接使用 maybe_rel_path
+- Path(base_dir) / maybe_rel_path
+- Path(base_dir) / "raw" / maybe_rel_path
+
+只要某个路径存在，就返回那个 Path。
+
+这说明这个脚本考虑到了前面流程中路径表达可能不统一的问题，因此比单纯硬编码路径更稳健。
+它能处理：
+- 已经是绝对路径的情况
+- 相对 data 根目录的情况
+- 相对 data/raw 的情况
+
+这个设计的实际意义是：
+减少因为 summary_json_path 或 poscar_path 的相对路径写法不同而造成的报错。
+
+-------------------------------------
+八、公式解析：parse_formula_simple
+-------------------------------------
+
+函数：
+parse_formula_simple(formula)
+
+作用：
+把一个简单化学式解析成元素-计量数的字典。
+
+例如：
+Fe2O3 -> {"Fe": 2.0, "O": 3.0}
+LiCoO2 -> {"Li": 1.0, "Co": 1.0, "O": 2.0}
+
+它的实现方式是从左到右扫描字符串：
+- 先识别大写字母开头的元素符号
+- 如果后面有小写字母，就拼接成完整元素名
+- 再读取紧跟的数字或小数作为计量数
+- 如果没有数字，则默认为 1.0
+
+局限性：
+这个函数只适用于比较简单的公式，不支持：
+- 括号嵌套
+- 水合物
+- 复杂配位式
+- 带中点的表达
+- 更复杂的化学式语法
+
+也就是说，它比较适合当前 refined 数据里已经相对规范化的 formula 字段，而不是任意原始化学表达式。
+
+-----------------------------------------
+九、组成特征：composition_features
+-----------------------------------------
+
+函数：
+composition_features(formula, element_vocab)
+
+作用：
+从 formula 中提取一组组成层面的统计特征。
+
+如果公式为空或者解析失败，则输出全零特征。
+
+1. 提取的核心特征
+
+(1) 基础组成统计
+- feat_n_elements_formula
+  公式中元素种类数
+
+- feat_total_atoms_formula
+  公式中原子总数（按计量数求和）
+
+(2) 化学计量熵
+- feat_stoich_entropy
+  对元素比例做 Shannon entropy，用来表征组分均匀程度或复杂程度
+
+(3) 原子序数加权统计
+- feat_z_mean
+  按元素原子分数加权的平均原子序数
+
+- feat_z_std
+  原子序数加权标准差
+
+这两个特征试图描述组成中元素“轻重分布”的中心和离散程度。
+
+(4) 元素类别比例
+- feat_frac_tm
+- feat_frac_alkali
+- feat_frac_alkaline
+- feat_frac_halogen
+- feat_frac_chalcogen
+- feat_frac_lanthanoid
+- feat_frac_actinoid
+
+这些特征用于描述材料组成中不同化学家族的占比。
+
+(5) 元素级 one-hot/比例表示
+对于 element_vocab 中的每个元素，都会生成：
+feat_frac_el__{元素}
+
+例如：
+- feat_frac_el__Fe
+- feat_frac_el__O
+- feat_frac_el__Ni
+
+这些列的值是该元素在公式中的摩尔分数。
+
+2. 这部分特征的意义
+这一部分特征属于典型的 composition descriptor。
+它最大的优点是：
+即使没有完整结构文件，也可以从 formula 中提取有用信息。
+
+因此，这一块是最基础也最稳健的一层特征。
+
+---------------------------------------
+十、summary.json 特征：结构摘要层
+---------------------------------------
+
+函数：
+load_summary_features(summary_path)
+
+作用：
+从 summary.json 中提取更丰富的结构摘要特征。
+
+1. 默认行为
+在函数开头，它会先为所有候选特征设置默认值。
+如果 summary 文件不存在或者加载失败，就：
+- feat_has_summary = 0.0
+- 其余数值特征保持为 0
+
+因此，它的行为是“尽量不中断流程”，而不是因为单个样本缺 summary 就报错。
+
+2. 提取的特征类别
+
+(1) 结构/物性基本量
+- feat_density
+- feat_volume
+- feat_nsites
+- feat_nelements
+- feat_band_gap
+- feat_energy_above_hull
+- feat_spacegroup_number
+
+其中 energy_above_hull 同时兼容：
+- energy_above_hull
+- e_above_hull
+
+spacegroup number 同时兼容：
+- symmetry.number
+- spacegroup_number
+
+说明写这个函数时考虑了不同 summary JSON 的字段命名不一致问题。
+
+(2) 晶格参数
+- feat_lattice_a
+- feat_lattice_b
+- feat_lattice_c
+- feat_lattice_alpha
+- feat_lattice_beta
+- feat_lattice_gamma
+
+这些值优先从：
+- structure.lattice.*
+读取，
+找不到时再尝试：
+- lattice.*
+
+(3) 晶系 one-hot
+脚本定义了 7 种晶系：
+- triclinic
+- monoclinic
+- orthorhombic
+- tetragonal
+- trigonal
+- hexagonal
+- cubic
+
+如果 summary 里有 crystal_system，就会把对应的：
+feat_crystal_system__{system}
+设为 1.0，其余保持 0。
+
+(4) 标识位
+- feat_has_summary
+
+用来表示该样本是否成功加载了 summary 特征。
+
+3. 这一部分特征的意义
+这一部分特征比 formula 更接近真实结构层面，包含：
+- 体积
+- 晶格
+- 稳定性
+- 带隙
+- 空间群
+- 晶系
+
+因此可以理解为“中层结构描述符”。
+
+---------------------------------------
+十一、POSCAR 几何特征：局域结构层
+---------------------------------------
+
+这部分是可选的。
+只有在命令行传入：
+
+--use_poscar_geom
+
+时才真正读取 POSCAR 并计算几何特征。
+否则会返回默认值。
+
+相关函数：
+- parse_poscar
+- lattice_lengths_angles
+- min_image_distances
+- load_poscar_features
+
+1. parse_poscar(poscar_path)
+作用：
+手工解析 VASP5 格式 POSCAR 文件。
+
+读取内容包括：
+- 缩放因子
+- 3×3 晶格矩阵
+- 元素列表
+- 各元素个数
+- 坐标模式（Direct / Cartesian）
+- 原子坐标
+
+最后统一返回：
+- species
+- counts
+- lattice
+- frac（分数坐标）
+- cart（笛卡尔坐标）
+- nsites
+
+如果格式有问题或文件太短，则返回 None。
+
+2. lattice_lengths_angles(latt)
+作用：
+从晶格矩阵中计算：
+- a, b, c
+- alpha, beta, gamma
+
+这部分是标准的几何量提取。
+
+3. min_image_distances(frac, lattice, max_sites=256)
+这是 POSCAR 特征提取的核心。
+
+它会在周期边界条件下使用最小镜像原则计算原子间距离，并提取如下统计量：
+
+(1) 晶胞基础特征
+- feat_poscar_has_geom
+- feat_poscar_nsites
+- feat_poscar_volume
+- feat_poscar_a
+- feat_poscar_b
+- feat_poscar_c
+- feat_poscar_alpha
+- feat_poscar_beta
+- feat_poscar_gamma
+
+(2) 原子对距离统计
+- feat_pairdist_min
+- feat_pairdist_mean
+- feat_pairdist_std
+- feat_pairdist_q25
+- feat_pairdist_q50
+- feat_pairdist_q75
+
+这反映了整个结构中原子对距离分布的形状。
+
+(3) 最近邻距离统计
+- feat_nn_mean
+- feat_nn_std
+
+对每个原子计算最近邻距离，再取均值和标准差。
+
+(4) 截断配位数统计
+分别在 3 Å、4 Å、5 Å 截断下统计每个原子的邻居数，并计算均值和标准差：
+- feat_coord_3A_mean
+- feat_coord_3A_std
+- feat_coord_4A_mean
+- feat_coord_4A_std
+- feat_coord_5A_mean
+- feat_coord_5A_std
+
+4. 为什么设置 max_sites=256
+这是为了控制计算成本。
+如果结构太大，二重循环的距离计算会变慢。
+因此超过 max_sites 的样本会直接返回默认值，避免脚本整体运行过慢。
+
+5. 这一部分特征的意义
+与 formula 和 summary 相比，POSCAR 几何特征更接近局域原子结构层面。
+虽然它不是图神经网络那种高阶结构表示，但已经能提供：
+- 晶格形状信息
+- 最近邻尺度
+- 配位统计
+- 原子间距离分布
+
+因此，这一部分可以看作“较基础但有用的几何结构描述符”。
+
+-----------------------------------------
+十二、行级特征构建：featurize_row
+-----------------------------------------
+
+函数：
+featurize_row(row, base_dir, element_vocab, use_poscar_geom, poscar_max_sites)
+
+作用：
+把一条 JSONL 样本转换成一行结构描述符特征。
+
+它做的事情可以拆成三块：
+
+1. 保留 metadata
+以下字段会直接写入输出表：
+- id
+- synth_uid
+- source_dataset
+- record_index
+- material_id
+- formula
+- mp_formula
+- synth_formula
+- parent_formula
+- doi
+- split_group
+- synthesis_type
+- reaction_string
+
+2. 保留监督目标字段
+- target_main_precursors
+- target_aux_precursors
+- target_temperature_c
+- target_time_h
+- target_atmosphere
+- target_solvent
+
+其中前驱体列表会被存成 JSON 字符串，便于表格保存。
+
+3. 提取结构特征
+依次加入：
+- composition_features
+- load_summary_features
+- load_poscar_features（如果启用）
+
+因此，featurize_row 是整条样本从“结构化记录”变成“特征行”的核心函数。
+
+----------------------------------------
+十三、如何构建 element vocab
+----------------------------------------
+
+函数：
+gather_element_vocab(rows)
+
+作用：
+遍历所有输入行的 formula，提取其中出现的元素种类，并生成排序后的 element_vocab。
+
+重要点：
+这个 vocab 不是只用训练集，而是用 stage2/stage3 所有 split 的全部样本构建。
+这样做的结果是：
+整个数据集的元素特征列维度保持统一。
+
+为什么这么做问题不大？
+因为 element_vocab 属于输入特征空间的一部分，不是监督标签空间。
+它只是决定哪些元素比例列要被展开。
+与标签 vocab 不同，它不直接引入监督泄漏问题。
+
+----------------------------------------
+十四、stage2 标签构建逻辑
+----------------------------------------
+
+1. build_stage2_vocab(train_rows)
+作用：
+只从 stage2_train 的 main_precursors 中构建 precursor_vocab。
+
+这一点非常重要，因为它遵循了一个规范原则：
+标签空间只应从训练集定义，避免使用验证集和测试集信息。
+
+2. raw_to_stage2_ml(df_raw, precursor_vocab)
+作用：
+在 raw 表基础上，为 precursor_vocab 中的每个前驱体生成一个二值标签列。
+
+对于每个前驱体 p，会生成：
+label_prec__{p}
+
+规则：
+如果该样本的 target_main_precursors 包含 p，则该列为 1，否则为 0。
+
+因此，stage2 的标签表示方式是：
+多标签二值矩阵。
+
+这意味着 stage2 任务本质上是：
+“给定结构特征，预测一组主前驱体标签”。
+
+----------------------------------------
+十五、stage3 标签构建逻辑
+----------------------------------------
+
+1. build_stage3_class_vocab(train_rows, key)
+作用：
+从 stage3_train 中收集指定字段的所有非空值，形成类别 vocab。
+
+该函数分别被用于：
+- atmosphere
+- solvent
+- synthesis_type
+
+因此得到：
+- atmosphere_vocab
+- solvent_vocab
+- synthesis_type_vocab
+
+2. raw_to_stage3_ml(df_raw, atmosphere_vocab, solvent_vocab, synthesis_type_vocab)
+作用：
+在 raw 表基础上，为每个类别 vocab 生成 one-hot 标签。
+
+例如：
+- label_atm__air
+- label_atm__ar
+- label_solv__water
+- label_solv__ethanol
+- label_synth__solid-state
+- label_synth__hydrothermal
+
+3. 关于 temperature_c 和 time_h
+需要注意的是，这个脚本并没有把：
+- target_temperature_c
+- target_time_h
+
+进一步离散化成标签列，而是原样保留在 raw.csv 和 ml.csv 中。
+
+这说明作者的意图很可能是：
+后续模型再针对这两个字段做连续值回归、归一化、缺失 mask 等处理。
+
+换句话说，这个脚本对 stage3 只完成了“类别目标的 one-hot 化”，而没有在这里完成所有下游监督处理。
+
+-----------------------------------------
+十六、raw.csv 与 ml.csv 的区别
+-----------------------------------------
+
+这是理解这个脚本输出的关键。
+
+1. raw.csv
+raw.csv 包含：
+- metadata
+- 结构描述符特征
+- 原始监督目标字段
+
+例如：
+- target_main_precursors 仍是 JSON 列表字符串
+- target_temperature_c 仍是连续数值
+- target_atmosphere 仍是原始字符串
+
+raw.csv 的优势是：
+保留信息完整，便于调试、检查、再处理。
+
+2. ml.csv
+ml.csv 是在 raw.csv 基础上增加机器学习标签列后的版本。
+
+Stage2：
+增加 label_prec__* 多标签列
+
+Stage3：
+增加 label_atm__* / label_solv__* / label_synth__* 列
+
+ml.csv 的优势是：
+可以更直接地被后续机器学习脚本读取。
+
+因此你可以把两者理解为：
+- raw.csv：人读和调试友好
+- ml.csv：训练友好
+
+-----------------------------------------
+十七、split 级别处理：process_stage2_split / process_stage3_split
+-----------------------------------------
+
+1. process_stage2_split(...)
+作用：
+对某个 stage2 split（如 train/val/test）执行完整处理。
+
+流程：
+- 对 rows 中每一条调用 featurize_row()
+- 组成 df_raw
+- 调用 raw_to_stage2_ml() 生成 df_ml
+- 将 df_raw 写成 *_raw.csv
+- 将 df_ml 写成 *_ml.csv
+- 返回该 split 的统计信息：
+  - n_rows
+  - n_features_raw
+  - n_features_ml
+
+2. process_stage3_split(...)
+逻辑与 stage2 类似，只不过标签生成方式改成 raw_to_stage3_ml()。
+
+因此，这两个函数的作用是：
+把“行级特征化”和“任务级标签构建”整合成一个 split 级别的完整流程。
+
+-----------------------------------------
+十八、main() 的执行流程详细说明
+-----------------------------------------
+
+main() 是整个脚本的调度中心。
+
+它做了以下事情：
+
+1. 解析命令行参数
+参数包括：
+- --base_dir
+- --input_dir
+- --output_dir
+- --use_poscar_geom
+- --poscar_max_sites
+
+2. 创建输出目录
+确保 output_dir 和 output_dir/meta 存在。
+
+3. 读取全部 split
+分别读取 stage2 和 stage3 的：
+- train
+- val
+- test
+- gold_train_holdout
+
+4. 从 train 构建标签 vocab
+- precursor_vocab 来自 stage2_train
+- atmosphere_vocab 来自 stage3_train
+- solvent_vocab 来自 stage3_train
+- synthesis_type_vocab 来自 stage3_train
+
+5. 从所有行构建 element_vocab
+将 stage2/stage3 的所有 split 合并后提取公式中的元素。
+
+6. 将 vocab 写入 meta/
+输出：
+- element_vocab.json
+- precursor_vocab.json
+- atmosphere_vocab.json
+- solvent_vocab.json
+- synthesis_type_vocab.json
+
+7. 分别处理 stage2 的每个 split
+对 train/val/test/gold_train_holdout 调用 process_stage2_split()
+
+8. 分别处理 stage3 的每个 split
+对 train/val/test/gold_train_holdout 调用 process_stage3_split()
+
+9. 汇总统计并写出 build_summary.json
+记录：
+- config
+- vocab_sizes
+- 每个输出文件的行数和列数
+
+因此，main() 的功能不是复杂算法，而是把整套特征工程流水线串起来，并保证输出结构一致、可复现。
+
+-----------------------------------------
+十九、build_summary.json 的价值
+-----------------------------------------
+
+这个脚本最后会输出 build_summary.json。
+它一般会包含：
+
+1. config
+记录运行时参数：
+- base_dir
+- input_dir
+- output_dir
+- use_poscar_geom
+- poscar_max_sites
+
+2. vocab_sizes
+记录：
+- element_vocab 的大小
+- precursor_vocab 的大小
+- atmosphere_vocab 的大小
+- solvent_vocab 的大小
+- synthesis_type_vocab 的大小
+
+3. files
+记录每个 stage2/stage3 split 的：
+- n_rows
+- n_features_raw
+- n_features_ml
+
+这个文件的意义很大，因为你可以快速检查：
+- 数据是否都成功生成
+- train/val/test 行数是否正常
+- 加上标签后维度增长了多少
+- 是否因为 POSCAR 几何特征启用而导致列数变化
+
+-----------------------------------------
+二十、这个脚本的优点
+-----------------------------------------
+
+1. 模块化清晰
+公式特征、summary 特征、POSCAR 特征、标签构建相互独立，便于扩展和调试。
+
+2. 输入输出规范
+统一读取 split 后 JSONL，统一输出 raw.csv / ml.csv / meta 信息，便于后续流水线衔接。
+
+3. 标签 vocab 只从 train 构建
+这是很规范的做法，能避免标签空间泄漏。
+
+4. raw 和 ml 双版本输出
+既方便调试，也方便训练。
+
+5. POSCAR 几何特征可选
+支持做消融实验，例如：
+- 只用 composition + summary
+- 再加 POSCAR geometry
+
+6. 路径解析较稳健
+比简单拼接路径更不容易出错。
+
+-----------------------------------------
+二十一、这个脚本的局限与注意点
+-----------------------------------------
+
+1. 化学式解析较简单
+parse_formula_simple 只能处理简单公式，复杂公式可能解析失败。
+
+2. POSCAR 特征较基础
+这里的几何特征主要是距离统计和简单配位统计，并不是高阶结构表示。
+如果后续追求更强结构建模能力，通常还需要图网络特征或更复杂描述符。
+
+3. summary 缺失时会归零
+虽然流程不会中断，但如果缺失很多 summary 文件，可能导致部分样本信息不足。
+
+4. stage3 连续目标还没有在这里完成完整处理
+temperature_c 和 time_h 只是保留原值，后续还需要：
+- 缺失值处理
+- 归一化
+- mask 构造
+- 回归目标封装
+
+5. element_vocab 用的是所有 split
+这在输入特征空间上通常没有问题，但如果你极端严格地要求“任何统计都只从 train 来”，也可以讨论是否改成 train-only。不过一般来说，这里问题不大。
+
+-----------------------------------------
+二十二、如果从项目角度理解这个脚本
+-----------------------------------------
+
+这个脚本的真正意义并不只是“生成 CSV”。
+
+它完成的是从“结构化样本记录”到“模型可消费输入”的转换。
+也就是说，它是整个 SynPred 项目中传统表格特征建模路线的关键桥梁。
+
+你可以把它理解成：
+
+1. 对输入结构信息做统一数值化
+- formula -> composition descriptor
+- summary.json -> 材料摘要特征
+- POSCAR -> 几何统计特征
+
+2. 对监督目标做统一标签化
+- stage2 -> 前驱体多标签矩阵
+- stage3 -> 气氛/溶剂/合成类型 one-hot
+
+3. 输出标准化表格文件
+使得后续 stage2/stage3 模型能够直接读取，不必再处理原始 JSON 结构。
+
+-----------------------------------------
+二十三、最简版结论
+-----------------------------------------
+
+01_build_structdesc_features.py 的核心功能就是：
+
+把 split 后的结构-合成 JSONL 数据，转换为面向 stage2/stage3 的结构描述符表格特征，并同时构建机器学习标签，最终输出 raw.csv、ml.csv 以及 vocab 和 summary 元信息。
+
+更具体地说，它完成了三件大事：
+
+第一，提取结构描述符
+- 组成特征
+- summary 结构特征
+- 可选 POSCAR 几何特征
+
+第二，构建监督标签
+- stage2：前驱体多标签
+- stage3：atmosphere / solvent / synthesis_type 的 one-hot 标签
+- 同时保留 temperature / time 的连续目标
+
+第三，标准化输出
+- 每个 split 输出 raw.csv 和 ml.csv
+- 保存 vocab
+- 保存构建摘要
+
+因此，它是整个结构描述符建模流程中最核心的特征工程脚本之一。
+
+-----------------------------------------
+二十四、可直接引用的简短说明
+-----------------------------------------
+
+可以将该脚本概括为：
+
+该脚本从经过 train/val/test 切分的结构-合成样本中提取结构描述符特征，包含化学组成特征、summary 文件中的材料属性特征，以及可选的 POSCAR 几何统计特征；随后针对 stage2 构建前驱体多标签监督信号，针对 stage3 构建 atmosphere、solvent 和 synthesis_type 的分类标签，并输出面向下游模型训练的 raw/ML 两类 CSV 文件以及相应的 vocab 和构建摘要信息。

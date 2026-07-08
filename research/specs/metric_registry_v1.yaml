@@ -1,0 +1,241 @@
+registry_version: metric_registry_v1
+metrics:
+  - metric_id: method.iid.complete_case.method_accuracy
+    task: e2e_route_specification_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [method]
+    denominator: complete comparable reference routes
+    match_rule: exact canonical method label
+    tolerance: {}
+    k:
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude incomplete method labels
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.method_accuracy
+  - metric_id: method.iid.complete_case.method_macro_f1
+    task: e2e_route_specification_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [method]
+    denominator: complete comparable reference routes
+    match_rule: macro F1 over canonical method labels
+    tolerance: {}
+    k:
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude incomplete method labels
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.method_macro_f1
+  - metric_id: rsp.iid.complete_case.precursor_exact@1
+    task: method_conditioned_route_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [canonical_precursor_set]
+    denominator: samples with comparable precursor references
+    match_rule: exact canonical set match
+    tolerance: {}
+    k: 1
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude missing precursor references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.precursor_exact_at_k
+  - metric_id: rsp.iid.complete_case.precursor_recall@5
+    task: method_conditioned_route_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [canonical_precursor_set]
+    denominator: samples with comparable precursor references
+    match_rule: reference set appears within top-k canonical skeletons
+    tolerance: {}
+    k: 5
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude missing precursor references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.precursor_recall_at_k
+  - metric_id: rsp.iid.complete_case.precursor_recall@10
+    task: method_conditioned_route_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [canonical_precursor_set]
+    denominator: samples with comparable precursor references
+    match_rule: reference set appears within top-k canonical skeletons
+    tolerance: {}
+    k: 10
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude missing precursor references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.precursor_recall_at_k
+  - metric_id: rsp.iid.complete_case.precursor_recall@50
+    task: method_conditioned_route_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [canonical_precursor_set]
+    denominator: samples with comparable precursor references
+    match_rule: reference set appears within top-k canonical skeletons
+    tolerance: {}
+    k: 50
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude missing precursor references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.precursor_recall_at_k
+  - metric_id: rsp.iid.complete_case.precursor_jaccard@1
+    task: method_conditioned_route_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [canonical_precursor_set]
+    denominator: samples with comparable precursor references
+    match_rule: Jaccard of top1 canonical precursor set
+    tolerance: {}
+    k: 1
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude missing precursor references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.precursor_jaccard_at_1
+  - metric_id: cdg.iid.available_field.temperature_mae
+    task: method_conditioned_route_prediction
+    split: iid
+    protocol: available_field
+    evaluated_fields: [temperature]
+    denominator: samples with recorded temperature
+    match_rule: absolute error in Celsius
+    tolerance: {}
+    k:
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: evaluate only available temperature labels
+    canonicalization_version: canonicalization_v1
+    higher_is_better: false
+    implementation_function: synpred.research.metrics.temperature_mae
+  - metric_id: cdg.iid.complete_case.condition_ref_match@1
+    task: method_conditioned_route_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [temperature, time, atmosphere, solvent]
+    denominator: samples with complete comparable condition references
+    match_rule: legacy relaxed condition rule unless protocol_v2 supersedes it
+    tolerance: {temperature_c: 200, time_h: 48, atmosphere: exact_when_known}
+    k: 1
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude incomplete condition labels
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.condition_ref_match_at_k
+  - metric_id: cdg.iid.complete_case.condition_ref_match@5
+    task: method_conditioned_route_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [temperature, time, atmosphere, solvent]
+    denominator: samples with complete comparable condition references
+    match_rule: legacy relaxed condition rule unless protocol_v2 supersedes it
+    tolerance: {temperature_c: 200, time_h: 48, atmosphere: exact_when_known}
+    k: 5
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude incomplete condition labels
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.condition_ref_match_at_k
+  - metric_id: cdg.iid.complete_case.condition_ref_match@10
+    task: method_conditioned_route_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [temperature, time, atmosphere, solvent]
+    denominator: samples with complete comparable condition references
+    match_rule: legacy relaxed condition rule unless protocol_v2 supersedes it
+    tolerance: {temperature_c: 200, time_h: 48, atmosphere: exact_when_known}
+    k: 10
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude incomplete condition labels
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.condition_ref_match_at_k
+  - metric_id: e2e_route.iid.complete_case.route_ref_match@1
+    task: e2e_route_specification_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [method, canonical_precursor_set, temperature, time, atmosphere, solvent]
+    denominator: complete comparable reference routes
+    match_rule: exact method and precursor set plus condition_ref_match
+    tolerance: {temperature_c: 200, time_h: 48, atmosphere: exact_when_known}
+    k: 1
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude incomplete route references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.route_ref_match_at_k
+  - metric_id: e2e_route.iid.complete_case.route_ref_match@5
+    task: e2e_route_specification_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [method, canonical_precursor_set, temperature, time, atmosphere, solvent]
+    denominator: complete comparable reference routes
+    match_rule: exact method and precursor set plus condition_ref_match
+    tolerance: {temperature_c: 200, time_h: 48, atmosphere: exact_when_known}
+    k: 5
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude incomplete route references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.route_ref_match_at_k
+  - metric_id: e2e_route.iid.complete_case.route_ref_match@10
+    task: e2e_route_specification_prediction
+    split: iid
+    protocol: complete_case
+    evaluated_fields: [method, canonical_precursor_set, temperature, time, atmosphere, solvent]
+    denominator: complete comparable reference routes
+    match_rule: exact method and precursor set plus condition_ref_match
+    tolerance: {temperature_c: 200, time_h: 48, atmosphere: exact_when_known}
+    k: 10
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: exclude incomplete route references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.route_ref_match_at_k
+  - metric_id: e2e_route.iid.diagnostic.skeleton_oracle
+    task: oracle_context_component_evaluation
+    split: iid
+    protocol: diagnostic
+    evaluated_fields: [canonical_precursor_set]
+    denominator: samples in frozen candidate pool
+    match_rule: reference skeleton appears anywhere within fixed skeleton budget
+    tolerance: {}
+    k:
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: report N and exclude invalid references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.skeleton_oracle
+  - metric_id: e2e_route.iid.diagnostic.route_oracle
+    task: oracle_context_component_evaluation
+    split: iid
+    protocol: diagnostic
+    evaluated_fields: [method, canonical_precursor_set, temperature, time, atmosphere, solvent]
+    denominator: samples in frozen route candidate pool
+    match_rule: reference route appears anywhere within fixed route budget
+    tolerance: {temperature_c: 200, time_h: 48, atmosphere: exact_when_known}
+    k:
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: report N and exclude invalid references
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.route_oracle
+  - metric_id: e2e_route.iid.operational.valid_route_rate
+    task: e2e_route_specification_prediction
+    split: iid
+    protocol: operational_validity
+    evaluated_fields: [parseability, element_coverage, chemistry_rules, required_fields]
+    denominator: generated route candidates
+    match_rule: route passes operational checks
+    tolerance: {}
+    k:
+    candidate_budget: candidate_budget_v1
+    missing_value_policy: missing required output field is invalid
+    canonicalization_version: canonicalization_v1
+    higher_is_better: true
+    implementation_function: synpred.research.metrics.valid_route_rate
+

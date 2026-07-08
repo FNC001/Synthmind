@@ -1,0 +1,501 @@
+================================================================================
+SynPred: Structure-to-Synthesis Route Prediction Pipeline
+Complete Documentation for Paper Writing
+================================================================================
+
+1. OVERVIEW
+================================================================================
+
+SynPred is a multi-stage generative pipeline that predicts complete solid-state
+synthesis routes from crystal structure inputs. Given a target material's crystal
+structure (POSCAR format), the system outputs ranked synthesis recipes including:
+  - Precursor chemical sets
+  - Synthesis temperature (°C)
+  - Synthesis time (hours)
+  - Confidence scores and reliability assessments
+
+The pipeline consists of three main stages:
+  Stage 2: Structure → Precursor Set Prediction (generative)
+  Stage 3: (Structure + Precursors) → Condition Prediction (generative)
+  Stage 3.5: Route Ranking and Quality Assessment
+
+================================================================================
+
+2. DATA SOURCE AND PREPROCESSING
+================================================================================
+
+2.1 Raw Data
+-------------
+- Source: Materials Project (MP) synthesis database + literature-mined recipes
+- Primary dataset: 38,505 synthesis records aligned with MP crystal structures
+- Unique materials: 3,451
+- Mean recipes per material: 11.2
+- Data files:
+  * solid-state_dataset_20200713.json (solid-state synthesis, 194 MB)
+  * solutionsynthesis_dataset_202185.json (solution synthesis, 167 MB)
+  * mp_synth_direct_aligned/direct_aligned_dataset.jsonl (aligned, 276 MB)
+
+2.2 Data Quality Tiers
+-----------------------
+- Gold standard: High-confidence matches (structure ↔ synthesis recipe)
+  * Stage2 gold: 4,275 records
+  * Stage3 gold: 3,554 records
+- Relaxed: Lower-confidence but still valid matches
+  * Stage2 relaxed: 22,797 records
+  * Stage3 relaxed: 22,314 records
+
+2.3 Train/Val/Test Split
+--------------------------
+Split strategy: GroupShuffleSplit by material_id (no material leakage)
+Val ratio: 15%, Test ratio: 15%, Seed: 42
+
+Stage2 splits:
+  Train: 21,415 rows (18,919 unique materials)
+  Val:   641 rows (566 unique materials)
+  Test:  641 rows (566 unique materials)
+
+Stage3 splits:
+  Train: 21,165 rows (18,780 unique materials)
+  Val:   533 rows (475 unique materials)
+  Test:  533 rows (468 unique materials)
+
+================================================================================
+
+3. FEATURE ENGINEERING
+================================================================================
+
+3.1 Stage2 Features (323 dimensions)
+--------------------------------------
+Input: Crystal structure (POSCAR) → Feature vector
+
+Feature categories:
+  - CGCNN graph embedding: 128 features
+    (Crystal Graph Convolutional Neural Network, pretrained)
+  - CHGNet graph embedding: 64 features
+    (Crystal Hamiltonian Graph Neural Network, pretrained)
+  - Element fraction (one-hot): 75 features
+    (Binary presence of each element in the target formula)
+  - Composition statistics: 46 features
+    (n_elements, total_atoms, stoichiometric entropy, Z mean/std,
+     fraction of transition metals, alkali, alkaline earth, halogens,
+     chalcogens, lanthanoids, actinoids)
+  - Structural descriptors: 10 features
+    (density, volume, lattice parameters, space group)
+
+3.2 Stage3 Features (1,133 dimensions)
+----------------------------------------
+Input: Crystal structure + Precursor set → Feature vector
+
+Additional features beyond Stage2:
+  - Precursor set encoding (y_set): 817-dim multi-hot vector
+  - Precursor vocabulary: 817 unique precursor chemicals
+  - Same structural/compositional features as Stage2
+
+3.3 Condition Targets
+----------------------
+Continuous targets:
+  - temperature_c: Synthesis temperature
+    * Mean: 842.6°C, Median: 830.0°C, Std: 374.3°C
+    * Range (clipped 1st-99th percentile): 4.0°C – 1,525.0°C
+  - time_h: Synthesis duration
+    * Mean: 21.0h, Median: 14.0h, Std: 22.7h
+    * Range (clipped): 0.17h – 126.0h
+
+Discrete targets:
+  - target_atmosphere_coarse: 4 classes
+    (Dropped from Stage3 condition model due to single valid class in
+     solid-state subset; handled by separate classifier)
+  - synthesis_type: solid-state (dominant class)
+
+================================================================================
+
+4. STAGE 2: PRECURSOR SET PREDICTION
+================================================================================
+
+4.1 Problem Formulation
+-------------------------
+Given a target material's feature vector x ∈ R^323, predict a SET of precursor
+chemicals y = {p1, p2, ..., pk} from a vocabulary of 807 precursors.
+Mean set size: 2.36 precursors per recipe.
+
+This is a SET GENERATION problem (variable-size, unordered output).
+
+4.2 GFlowNet Model Architecture
+---------------------------------
+Model: GFlowNet with Joint Reranking
+
+Architecture:
+  - x_proj: MLP([323] → [512, 256] → [256])  # Structure encoder
+  - set_proj: MLP([807, 256, 256])             # Partial set encoder
+  - step_emb: Embedding(max_traj_len+1, 256)   # Step position
+  - policy_head: MLP([256*3, 256, 807])        # Action probabilities
+
+Training:
+  - Loss: GFlowNet trajectory balance + RL reward shaping
+  - RL weight: 0.1 (hybrid supervised + RL)
+  - Exact match bonus: 4.0
+  - Length penalty: 0.05
+  - Hidden dim: 256
+  - Dropout: 0.1
+  - Learning rate: 0.001
+  - Batch size: 128
+  - Max epochs: 80, Early stopping patience: 12
+  - Warmup: 5 epochs
+
+Training data:
+  - Train: 3,265 samples (gold-only)
+  - Val: 690 samples
+  - Test: 696 samples
+
+4.3 Reranker
+--------------
+After GFlowNet generates candidate sets via sampling, a neural reranker
+scores and reorders them:
+  - Reranker architecture: MLP([256, 128])
+  - Training: Pairwise ranking loss on sampled candidates
+  - Sampling: 128 candidates per material at temperatures [0.8, 1.0, 1.2]
+  - Top-N saved: 50 candidates per material
+
+4.4 Element-Constrained Sampling
+----------------------------------
+Post-hoc constraint: Only retain candidates whose elements are consistent
+with the target material's composition (element conservation).
+
+Sampling config:
+  - 256 samples per material
+  - Temperatures: [0.8, 1.0, 1.2]
+  - Mean candidates after EC filtering: 19.0 per material (from 55.4)
+
+4.5 Multi-Source Ensemble
+---------------------------
+Six independent Stage2 models generate candidates in parallel:
+
+Model                        | Test Hit Rate | Candidates/Material
+-----------------------------|---------------|--------------------
+stage2_vqvae                 | 50.9%         | 8.0
+stage2_masked_denoiser       | 47.9%         | 8.0
+stage2_gflownet_joint_rerank | 20.8%         | 6.5
+stage2_ar_setgen             | 15.4%         | 4.6
+stage2_cvae                  | 8.6%          | 8.0
+stage2_setpred               | 7.4%          | 8.0
+
+Combined oracle hit rate (test): 84.3% (360/427 materials)
+Mean candidates per material (combined): 70.1
+
+4.6 Stage2 Metrics (GFlowNet with Element Constraints)
+--------------------------------------------------------
+Test set results:
+  - Greedy subset accuracy: 56.2%
+  - Greedy micro F1: 0.770
+  - Greedy samples Jaccard: 0.709
+  - Oracle exact match (top-50): 79.9%
+  - Element-consistent oracle: 76.3%
+  - Hit@1: 76.3%
+  - Hit@5: 77.6%
+  - Hit@10: 78.9%
+  - Hit@50: 79.9%
+
+================================================================================
+
+5. STAGE 3: SYNTHESIS CONDITION PREDICTION
+================================================================================
+
+5.1 Problem Formulation
+-------------------------
+Given structure features x ∈ R^1133 (including precursor set encoding),
+predict continuous synthesis conditions: temperature (°C) and time (h).
+
+This is a CONDITIONAL GENERATIVE problem — multiple valid conditions may
+exist for the same (structure, precursor) pair.
+
+5.2 Mixture Flow Model (Primary)
+----------------------------------
+Architecture: Conditional Normalizing Flow with Mixture of Experts
+
+  - Structure encoder: MLP([1133] → [512, 256])
+  - Set projection: Linear(817 → 256)
+  - Fusion: Concatenation
+  - Flow: 6 coupling layers, hidden_dim=256
+  - Mixture: 4 components with gating network (hidden_dim=128)
+  - LayerNorm: enabled
+  - Dropout: 0.1
+
+Training:
+  - Loss: Negative log-likelihood (flow)
+  - Learning rate: 0.0003
+  - Weight decay: 1e-5
+  - Batch size: 256
+  - Max epochs: 80, Patience: 15
+  - Gradient clipping: 5.0
+  - Generation samples: 32 per input
+  - Clip to training range: enabled
+
+Training data:
+  - Train: 172,166 samples (augmented with multiple precursor sets)
+  - Val: 2,167 samples
+  - Test: 2,039 samples
+
+5.3 LightGBM Quantile Ensemble (Complementary)
+-------------------------------------------------
+Architecture: 9 quantile regressors (τ = 0.1, 0.2, ..., 0.9)
+Provides uncertainty estimates and robust point predictions.
+
+Temperature prediction (test):
+  - Top-1 MAE: 147.6°C
+  - Top-1 Median AE: 94.5°C
+  - Top-1 R²: 0.541
+  - Within ±25°C: 15.6%
+  - Within ±50°C: 31.9%
+  - Within ±100°C: 52.8%
+  - Within ±200°C: 72.7%
+  - Oracle MAE: 51.7°C
+
+Time prediction (test):
+  - Top-1 MAE: 14.3h
+  - Top-1 Median AE: 8.4h
+  - Within ±2h: 15.6%
+  - Within ±5h: 30.4%
+  - Within ±10h: 54.4%
+  - Oracle MAE: 3.9h
+
+5.4 Atmosphere Classifier
+---------------------------
+Model: LightGBM multi-class classifier
+Classes: 4 (air, argon, nitrogen, vacuum/other)
+  - Accuracy: 77.9%
+  - Macro F1: 0.526
+  - Weighted F1: 0.794
+  - Majority baseline: 81.1%
+  (Note: atmosphere prediction is challenging due to class imbalance)
+
+5.5 Stage3 Metrics (Mixture Flow v3)
+--------------------------------------
+Test set (per-head, from v2 evaluation):
+  - Temperature MAE (top-1): 187.3°C
+  - Temperature R² (top-1): 0.282
+  - Temperature MAE (oracle best-of-32): 65.4°C
+  - Time MAE (top-1): 15.1h
+  - Time R² (top-1): 0.001
+  - Time MAE (oracle): 13.7h
+
+Combined mean MAE:
+  - Top-1: 102.6 (normalized)
+  - Oracle (best-of-32): 44.6
+
+================================================================================
+
+6. STAGE 3.5: ROUTE RANKING AND SELECTION
+================================================================================
+
+6.1 Problem Formulation
+-------------------------
+Given a large pool of candidate routes (precursor set × condition samples),
+rank them to surface the most plausible synthesis recipes.
+
+6.2 Template-Aware Pairwise Ranker (v43)
+------------------------------------------
+Model: ExtraTrees classifier (pairwise preference learning)
+
+Training:
+  - Input: Difference features between route pairs (78 chemistry features)
+  - Labels: Binary preference (which route is better)
+  - Training pairs: 19,784 (symmetric: 39,568)
+  - Split: GroupShuffleSplit by target_group (75/25)
+  - Excluded features: 24 (score/rank/prob features to prevent leakage)
+
+Performance:
+  - Accuracy: 98.2%
+  - Precision (class 0): 0.981
+  - Recall (class 0): 0.983
+  - F1 (macro): 0.982
+
+6.3 Joint GBDT Ranker (End-to-End Evaluation)
+-----------------------------------------------
+Model: XGBoost pairwise ranking
+Features: 298 (no-leak policy)
+Dataset: arset_mixflow_v3 joint candidates
+
+Test set evaluation (708,608 candidate routes, 423 materials):
+
+Recipe-level (precursor set match):
+  - Top-1 exact match rate: 10.4%
+  - MRR: 0.124
+  - Top-1 soft score: 0.719
+  - Oracle soft score: 0.856
+
+Condition-level (full route match, temp ±150°C, time ±24h):
+  - Top-1 exact match rate: 8.4%
+  - MRR: 0.103
+  - Top-1 soft score: 0.630
+  - Oracle soft score: 0.697
+
+6.4 Reliability Assessment
+----------------------------
+The pipeline includes multi-layer quality checks:
+  - Precursor QC: Element consistency, extra elements, elemental precursors
+  - Condition distribution confidence: How well conditions match training data
+  - Stage3 condition reference support: Cross-reference with known recipes
+  - Route confidence scoring: Combined reliability metric
+  - Warning levels: no_warning, minor_warning, major_warning
+  - Recommendation status: recommended, recommended_with_validation, review_required
+
+================================================================================
+
+7. INFERENCE PIPELINE
+================================================================================
+
+7.1 Pipeline Steps (24 steps total)
+-------------------------------------
+
+Common (Structure Input):
+  1. make_infer_split         - Register input POSCAR
+  2. build_structdesc         - Compute structural descriptors
+  3. build_chgnet_embedding   - CHGNet graph embedding
+  4. finalize_graph_embedding - Merge graph features
+
+Stage2 (Precursor Prediction):
+  5. build_stage2_features    - Assemble 323-dim feature vector
+  6. build_stage2_npz         - Convert to model input format
+  7. sample_stage2_gflownet   - GFlowNet sampling (256 candidates)
+  8. constrain_stage2_by_composition - Element consistency filter
+  9. summarize_stage2         - Candidate statistics
+  10. add_composition_fallback - Fallback for zero-candidate cases
+  11. retrieve_stage2_candidates - Retrieval-based candidates
+  12. predict_stage2_baseline  - Baseline model predictions
+  13. merge_stage2_sources     - Combine all candidate sources
+  14. rerank_stage2_by_elements - Element-aware reranking
+  15. fix_stage2_global_rank   - Final rank assignment
+
+Stage3 (Condition Prediction):
+  16. build_stage3_features    - Assemble 1133-dim features per candidate
+  17. build_stage3_conditioned_table - Expand candidates × conditions
+  18. run_stage3_flow          - Mixture flow sampling (32 per candidate)
+  19. run_stage3_lgbm          - LightGBM quantile predictions
+  20. compare_stage3_models    - Select best condition per candidate
+
+Stage3.5 (Route Ranking):
+  21. summarize_routes         - Assemble full route table
+  22. filter_display_routes    - Remove invalid routes
+  23. stage35_rule_rerank      - Rule-based initial ranking
+  24. stage35_learned_rerank   - ML-based final ranking (v43)
+  25. best_route_per_precursor - Deduplicate by precursor set
+
+Final:
+  26. export_final_top_routes  - Top-30 routes with confidence
+
+7.2 Runtime Performance
+-------------------------
+Benchmark (10 cases, CPU):
+  - Mean inference time: 39.1 seconds per material
+  - Min: 38.6s, Max: 39.9s
+  - 100% success rate (10/10)
+
+7.3 Output Format
+-------------------
+Per material, the pipeline outputs:
+  - final_recommended_routes.md: Human-readable ranked route table
+  - final_report.md: Reliability summary with warnings
+  - CSV files: Machine-readable route data with all scores
+  - pipeline_v3_manifest.json: Run metadata and timing
+
+Each route includes:
+  - Precursor set (e.g., "AlF3; Mn2P2O7")
+  - Temperature (°C)
+  - Time (h)
+  - Final recommendation score
+  - Confidence level
+  - Warning flags
+  - Condition reference support score
+
+================================================================================
+
+8. SUMMARY OF KEY METRICS
+================================================================================
+
++----------------------------------+------------------+-------------------+
+| Metric                           | Value            | Notes             |
++----------------------------------+------------------+-------------------+
+| Stage2 oracle hit rate (multi)   | 84.3%            | 6-model ensemble  |
+| Stage2 GFlowNet micro F1         | 0.770            | With EC sampling  |
+| Stage2 GFlowNet subset accuracy  | 56.2%            | Exact set match   |
+| Stage2 Hit@10                    | 78.9%            | EC constrained    |
+| Stage3 temp MAE (top-1, LGBM)   | 147.6°C          | Quantile ensemble |
+| Stage3 temp MAE (oracle, LGBM)  | 51.7°C           | Best of quantiles |
+| Stage3 time MAE (top-1, LGBM)   | 14.3h            | Quantile ensemble |
+| Stage3 time MAE (oracle, LGBM)  | 3.9h             | Best of quantiles |
+| Stage3 temp R² (LGBM)           | 0.541            | Top-1 prediction  |
+| Stage35 ranker accuracy          | 98.2%            | Pairwise v43      |
+| End-to-end top-1 soft score      | 0.719 (recipe)   | Joint evaluation  |
+| End-to-end oracle soft score     | 0.856 (recipe)   | Joint evaluation  |
+| End-to-end top-1 exact match     | 10.4% (recipe)   | Strict match      |
+| Inference time per material      | ~39 seconds      | CPU, full pipeline|
++----------------------------------+------------------+-------------------+
+
+================================================================================
+
+9. REPRODUCIBILITY
+================================================================================
+
+9.1 Software Dependencies
+---------------------------
+- Python 3.13+
+- PyTorch (CPU/CUDA/MPS)
+- LightGBM, XGBoost
+- CHGNet (pretrained graph neural network)
+- pymatgen (crystal structure processing)
+- scikit-learn, numpy, pandas
+
+9.2 Hardware Requirements
+---------------------------
+- Training: GPU recommended (CUDA/MPS), CPU feasible for LGBM
+- Inference: CPU sufficient (~39s per material)
+- Memory: 16GB+ RAM recommended
+- Disk: ~5GB for data + models
+
+9.3 Random Seeds
+-----------------
+All experiments use seed=42 for reproducibility.
+Split strategy ensures no material leakage between train/val/test.
+
+================================================================================
+
+10. RUNNING THE FULL PIPELINE
+================================================================================
+
+One-command execution:
+
+  bash scripts/run_full_pipeline.sh [PROJECT_ROOT] [DEVICE]
+
+Environment variables:
+  DEVICE=cpu|cuda|mps        (default: cpu)
+  FORCE=0|1                  (default: 0, skip completed steps)
+  START_FROM=step_name       (start from a specific step)
+  STOP_AFTER=step_name       (stop after a specific step)
+  INFER_NAME=name            (inference case name)
+  SKIP_RETRAIN=0|1           (use existing model checkpoints)
+
+Steps:
+  download → refine → split → features → graph_cache →
+  stage2_dataset → stage3_dataset → train_stage2 → train_stage2_ec →
+  train_stage3 → train_stage3_lgbm → train_stage35 → infer
+
+Example usage:
+  # Full pipeline from scratch
+  bash scripts/run_full_pipeline.sh /Users/wyc/SynPred cuda
+
+  # Skip training, just run inference
+  SKIP_RETRAIN=1 INFER_NAME=my_material bash scripts/run_full_pipeline.sh
+
+  # Rerun only inference step
+  FORCE=1 START_FROM=infer bash scripts/run_full_pipeline.sh
+
+  scripts/07_infer/structure_to_synthesis_route/pipeline/summarize_inference.py
+  
+  python scripts/07_infer/structure_to_synthesis_route/pipeline/summarize_inference.py \
+    --infer_name case_000001_batch_001_poscars_POSCAR \
+    --top_k 10
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+

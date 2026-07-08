@@ -1,5 +1,22 @@
-pandas>=2.0
-python-docx>=1.1
-pymatgen>=2024.0
 numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+scikit-learn>=1.3
+joblib>=1.3
+PyYAML>=6.0
+tqdm>=4.66
+
+# Model training and inference
+torch>=2.1
+lightgbm>=4.0
+chgnet>=0.3
+pymatgen>=2024.0
+mp-api>=0.40
+
+# Reporting, evaluation, and figures
+python-docx>=1.1
 matplotlib>=3.7
+SciencePlots>=2.1
+
+# Development checks
+pytest>=8.0

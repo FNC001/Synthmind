@@ -1,0 +1,651 @@
+% =============================================================================
+% Part III — Stage 07 端到端推理流水线
+% =============================================================================
+\part*{Part III \quad Stage 07 · 端到端推理流水线}
+\addcontentsline{toc}{part}{Part III — Stage 07 · 端到端推理流水线}
+
+\setcounter{section}{0}
+
+\section{整体架构}
+
+\subsection{目录布局}
+
+\begin{lstlisting}
+{project_root}/
+├── data/poscar/<task>/                  # 用户上传的目标 POSCAR
+├── data/interim/                        # 离线训练好的所有特征/词表
+├── runs/                                # 离线训练好的所有 ckpt
+└── outputs/inference/<infer_name>/
+    ├── work_dir/                         # 中间产物(可清理)
+    │   ├── split/infer.jsonl
+    │   ├── infer_structdesc.csv
+    │   ├── chgnet/graph_embed/...
+    │   ├── graph_embed/...
+    │   ├── stage2_*/, stage2_summary/
+    │   ├── stage3_*/, stage3_conditioned_x_*.csv
+    │   └── (各种 .summary.json)
+    └── out_dir/                          # 最终展示用产物
+        ├── stage3_condition_predictions_*/
+        ├── routes_flow_fallback_retrieval_baseline_element_reranked/
+        │   ├── synthesis_routes_*.csv
+        │   ├── final_top_routes*.csv
+        │   ├── final_recommended_routes.csv  ← 用户拿这个
+        │   └── *.md
+        └── pipeline_v3_manifest.json
+\end{lstlisting}
+
+\subsection{状态机(\code{PipelineRunner})}
+
+\code{PipelineRunner} 把"分散的命令行调用"组织成"带状态的有限状态机":
+\begin{itemize}
+    \item \code{self.outputs: Dict[str, str]} — 每步产出的关键文件路径
+    \item \code{self.degraded\_steps: List[Dict]} — 哪一步降级 + 原因
+    \item \code{self.step\_timings: List[Dict]} — 每步耗时(秒)
+    \item \code{record\_degradation(step, reason)} — 一旦降级就 \code{[DEGRADED]} 日志 + 写 manifest
+    \item \code{require\_file(path) / require\_dir(path)} — 缺文件直接 raise
+    \item \code{step\_enabled(name)} — 看 yaml \code{steps:} 块,某步 false 跳过
+    \item \code{restore\_existing\_outputs()} — 启动时扫 work\_dir/out\_dir 下既有产物,符合校验就回填进 \code{self.outputs}
+\end{itemize}
+
+\begin{repobox}[可重复要点 \#1]
+\code{restore\_existing\_outputs} 的 file 校验是关键(\file{runner.py:14-30})—— 一个 0 字节或只有表头的 csv 不会被认为有效,这避免了"上次跑崩了留下半成品 csv,这次以为有"。
+\end{repobox}
+
+\subsection{命令行}
+
+\begin{lstlisting}[language=bash]
+python run_pipeline.py \
+  --config <yaml>            # 必填,流水线配置
+  [--start_from <step_name>] # 从指定 step 重启(后续步骤都执行)
+  [--only_step <step_name>]  # 只跑这一步(便于调试)
+  [--skip_preflight]         # 跳过 STEP 0 的资源自检
+  [--infer_name <X>]         # 覆盖 yaml 里的 infer_name
+  [--project_root <path>]    # 覆盖 yaml 里的项目根
+\end{lstlisting}
+
+\textbf{配置加载}(\file{config.py},76 行):
+\begin{lstlisting}[language=Python]
+def load_config(path):
+    cfg = yaml.safe_load(...)
+    for _ in range(5):                  # 迭代 5 次解析模板
+        new_cfg = resolve_templates(cfg, cfg)
+        if new_cfg == cfg: break
+        cfg = new_cfg
+    cfg["_config_path"] = str(Path(path).resolve())
+    return cfg
+\end{lstlisting}
+
+\code{resolve\_templates} 把 \code{\{project\_root\}} / \code{\{infer\_name\}} / \code{\{stage2.gflownet\_run\_dir\}}(支持 \code{.} 路径)替换为实际值。\textbf{5 次迭代}是为了支持模板里嵌模板。
+
+\subsection{28 步全景}
+
+\begin{lstlisting}
+STEP 0  preflight                       — 资源/CKPT/词表自检
+STEP 1  make_infer_split                — POSCAR → infer.jsonl
+STEP 2  build_structdesc                — 结构描述子 CSV
+STEP 3  build_chgnet_embedding          — CHGNet 64-dim crystal_fea
+STEP 4  finalize_graph_embedding        — 优先 CGCNN,缺失则 CHGNet
+STEP 5  build_stage2_features           — Stage2 hybrid CSV
+STEP 6  build_stage2_npz                — 转 NPZ + meta(用 train 时 μ,σ)
+STEP 7  sample_stage2_gflownet          — standard 或 composition_biased
+STEP 8  constrain_stage2_by_composition — 后置硬过滤
+STEP 9  summarize_stage2                — unique_sets + count
+STEP 10 add_composition_fallback        — 元素覆盖低补"组成回退"前驱物
+STEP 11 retrieve_stage2_candidates      — k-NN 检索相似目标的真前驱物集合
+STEP 12 predict_stage2_baseline         — ExtraTrees 多标签基线
+STEP 13 merge_stage2_sources            — 四源合并
+STEP 14 rerank_stage2_by_elements       — 元素覆盖加权重排
+STEP 15 fix_stage2_global_rank          — 修补合并后 global rank
+STEP 16 build_stage3_features           — Stage3 hybrid CSV
+STEP 17 build_stage3_conditioned_table  — (x, parent_set) 行展开
+STEP 18  run_stage3_flow                — Mixture Flow 推理(默认关)
+STEP 18b run_stage3_lgbm                — LightGBM quantile 推理(默认开,主力)
+STEP 19  compare_stage3_models          — 二者一致性报表
+STEP 20  summarize_routes               — stage3_flat → 可读路线
+STEP 21  filter_display_routes          — 物理上限/下限
+STEP 22  stage35_rule_rerank            — 规则打分
+STEP 23  stage35_learned_rerank         — ExtraTrees regressor 重排
+STEP 24  stage35_v21_rerank             — ExtraTrees pairwise 重排(主力)
+STEP 25  best_route_per_precursor       — 同一前驱物只留最佳条件
+STEP 26  export_final_top_routes        — 选最强可用 ranking
+STEP 27  reliability_layer              — 6+ 子步骤
+STEP 28  select_final_recommended_routes — 最终稳定列写出
+\end{lstlisting}
+
+% --------------------------------------------------------------- §2
+\section{STEP 0--4:结构入口与图嵌入}
+
+\subsection{STEP 0 · \code{preflight}}
+
+不做任何写入,只检查上游 ckpt / 词表 / 模板目录就位:
+\begin{lstlisting}[language=Python]
+r.require_dir(paths["poscar_dir"])
+r.require_file(stage2["gflownet_ckpt"])
+r.require_dir(stage2["template_dir"])
+r.require_file(template_dir / "feature_cols.json")
+r.require_file(template_dir / "feature_mean.npy")     # train 期统计的 μ
+r.require_file(template_dir / "feature_std.npy")      # σ
+...
+\end{lstlisting}
+
+\textbf{为什么 preflight 要单独一步?}因为后续 step 跑到一半发现缺 ckpt 才报错,前面的中间产物白算。preflight 只读元数据,几毫秒,但能阻止 30min 后白跑。
+
+\subsection{STEP 1 · \code{make\_infer\_split}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/01_make_infer_split_from_poscars.py \
+  --poscar_dir <poscar_dir> \
+  --output_dir <work_dir>/split
+# 产出:<work_dir>/split/infer.jsonl
+\end{lstlisting}
+
+\code{infer.jsonl} 每行一条:
+\begin{lstlisting}[language=Python]
+{"sample_id": "abc", "formula": "Fe2O3", "poscar_path": ".../abc.vasp", ...}
+\end{lstlisting}
+
+\subsection{STEP 2 · \code{build\_structdesc}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/02_build_infer_structdesc_direct.py \
+  --infer_jsonl <infer.jsonl> \
+  --output_csv <work_dir>/infer_structdesc.csv
+\end{lstlisting}
+
+走 Stage 03 同样的描述子提取流程(matminer + magpie + composition + symmetry),无 GNN。输出 \file{infer\_structdesc.csv},每行一条,$\sim 120$ 列描述子。
+
+\subsection{STEP 3 · \code{build\_chgnet\_embedding}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/03_build_infer_graph_embeddings_chgnet.py \
+  --infer_jsonl ... --work_dir <work_dir>/chgnet \
+  --project_root ... --precursor_vocab_json ... \
+  --train_mode gold_only --max_sites 200
+\end{lstlisting}
+
+调用 CHGNet 预训练模型抽 \code{crystal\_fea}(默认 64 维)。对 site 数 $> 200$ 的超晶胞会触发 fallback,通常用对称化后的 primitive cell 替代。
+
+\subsection{STEP 4 · \code{finalize\_graph\_embedding}}
+
+\textbf{双路径}:
+\begin{enumerate}
+    \item \textbf{Primary}:CGCNN 缓存 + checkpoint + model\_py + model\_class 都齐 $\to$ 跑 04\_finalize 把 CGCNN embedding 与 CHGNet 拼接
+    \item \textbf{Fallback}:任一缺失 $\to$ \code{record\_degradation("finalize\_graph\_embedding", "CGCNN unavailable, using CHGNet-only")},直接把 CHGNet csv 抄到 \code{final\_graph\_embed\_csv}
+\end{enumerate}
+
+\begin{repobox}[可重复要点 \#3]
+这是流水线第一个"显式 degradation"。SynPred 哲学:任何上游模型缺失,流水线\textbf{降级而非崩溃}——下游模型可能仍能工作。但 manifest 必须如实记录降级。
+\end{repobox}
+
+% --------------------------------------------------------------- §3
+\section{STEP 5--15:Stage2 候选集合的"四源合并"}
+
+\subsection{STEP 5 · \code{build\_stage2\_features}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/05_build_hybrid_features_infer.py \
+  --task stage2 \
+  --output_dir <work_dir>/stage2_hybrid_csv \
+  --infer_descriptor_csv ... \
+  --infer_embedding_csv  ... \
+  --embedding_prefix graph_emb \
+  --replicate_to_train_val
+\end{lstlisting}
+
+\code{--replicate\_to\_train\_val} 是个奇怪但聪明的开关:即使是推理,也写出三份 train/val/test 同样内容,让下游"以为是数据集"。
+
+\subsection{STEP 6 · \code{build\_stage2\_npz}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/07_build_stage2_gflownet_infer_npz.py \
+  --infer_hybrid_csv ... \
+  --template_dir <stage2_gflownet_dataset/hybrid/gold_only> \
+  --output_dir <work_dir>/stage2_hybrid \
+  --split_name test
+\end{lstlisting}
+
+\textbf{关键 trick}:\code{--template\_dir} 指向训练时的 NPZ 目录,内部读 \code{feature\_mean.npy / feature\_std.npy / feature\_cols.json},\textbf{用训练期统计量标准化推理特征}。
+
+\subsection{STEP 7 · \code{sample\_stage2\_gflownet}}
+
+\textbf{两种模式}:
+
+\paragraph{(a) \code{composition\_biased}(默认)}
+\begin{lstlisting}[language=bash]
+python pipeline/src/19_sample_stage2_gflownet_composition_constrained.py \
+  --input_dir <stage2_npz_dir> \
+  --output_dir <work_dir>/stage2_gflownet_candidates_composition_decoding \
+  --ckpt_path <gflownet_ckpt> \
+  --split test --batch_size 128 --n_samples 100 \
+  --temperature 1.0 --top_k 20 \
+  --use_greedy_as_first \
+  --composition_constrained \
+  --target_hit_bonus 6.0 \
+  --extra_element_penalty 1.0 \
+  --no_overlap_penalty 6.0 \
+  --stop_bias -2.0 \
+  --ignore_elements H,O \
+  --device <device>
+\end{lstlisting}
+
+GFlowNet 在解码每一步加 element-aware bias:
+\begin{itemize}
+    \item \param{target\_hit\_bonus=6}:动作引入新的目标元素 $\to$ +6 logit
+    \item \param{extra\_element\_penalty=1}:动作引入非目标元素 $\to$ -1 logit
+    \item \param{no\_overlap\_penalty=6}:当前 set $\cup$ \{action\} 与目标元素无任何交集 $\to$ -6 logit
+    \item \param{stop\_bias=-2}:STOP 动作 logit -2(让模型生成更长的 set)
+    \item \param{ignore\_elements=H,O}:H/O 不算"目标元素"
+\end{itemize}
+
+\paragraph{(b) \code{standard}} 用 \file{06\_sample\_stage2\_gflownet\_infer.py},纯模型采样,无 element bias。
+
+\subsection{STEP 8 · \code{constrain\_stage2\_by\_composition}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/18_constrain_stage2_sample_candidates_by_composition.py \
+  --input_csv <test_samples.csv> \
+  --output_csv <test_samples_composition_constrained.csv> \
+  --min_coverage 0.0 --coverage_weight 20.0 \
+  --extra_penalty_weight 5.0 --rank_weight 0.01 \
+  --top_n_per_sample 100 \
+  --dedup [--drop_zero_overlap]
+\end{lstlisting}
+
+\subsection{STEP 9 · \code{summarize\_stage2}}
+
+聚合 step 7+8 的候选,按 set\_key 去重,统计:
+\begin{itemize}
+    \item \code{count}:同一 set 在所有采样中出现几次
+    \item \code{frequency = count / n\_samples}
+    \item \code{sample\_rank\_min/mean/max}:出现位次的统计
+    \item \code{decode\_methods\_seen}:greedy / sampled / composition\_biased 等
+\end{itemize}
+
+\subsection{STEP 10 · \code{add\_composition\_fallback}}
+
+如果一个目标的 GFlowNet 候选集合元素覆盖普遍偏低(例如目标含 P,但所有候选都没有磷源),\code{11\_add\_composition\_fallback} 会按目标元素族\textbf{直接拼}一些"标准前驱物 set":
+\begin{itemize}
+    \item 含 P $\to$ 加 \code{[P2O5, NH4H2PO4]}
+    \item 含 S $\to$ 加 \code{[S, Na2SO4]}
+    \item 含 K $\to$ 加 \code{[K2CO3, KNO3]}
+    \item 含 Li $\to$ 加 \code{[Li2CO3, LiOH·H2O]}
+\end{itemize}
+
+\subsection{STEP 11 · \code{retrieve\_stage2\_candidates}}
+
+\textbf{Case-based reasoning}:
+\begin{enumerate}
+    \item 在训练 NPZ 里取每个目标的 \code{(x\_struct, y\_set)}
+    \item 推理目标的 \code{x\_struct}(标准化空间)对训练库做余弦相似度
+    \item 返回 top-50 相似目标的真实前驱物集合(以 multi-hot label,阈值 0.5 二值化)
+\end{enumerate}
+
+\begin{repobox}[可重复要点 \#4]
+Retrieval 不是"和当前目标一模一样的训练样本"——它是"特征空间最近的训练样本",返回它们的真实前驱物作为候选。这等价于"如果新目标长得像 X 化合物,就把 X 的合成路线作为参考"。
+\end{repobox}
+
+\subsection{STEP 12 · \code{predict\_stage2\_baseline}}
+
+\textbf{多标签 ExtraTrees}:每个前驱物标签独立训练一个二分类器,推理出每个标签的概率 $P(\text{label}_i \mid x)$。
+
+候选生成:
+\begin{enumerate}
+    \item 取概率 $\geq 0.02$ 的标签 top-12
+    \item 按 \code{top\_k\_sets=30} 枚举 size $\leq 4$ 的所有子集组合,按 $\sum\log(P_i) + \sum\log(1-P_j)$ 打分
+    \item 输出 top-30 个 set
+\end{enumerate}
+
+\textbf{降级行为}:若 model 或 script 不存在,写一个空 csv(只有表头),让下游 \code{merge\_stage2\_sources} 仍能 concat 不出错。
+
+\subsection{STEP 13 · \code{merge\_stage2\_sources}}
+
+四源合并(GFlowNet 已经在 fallback\_csv 里):
+\begin{enumerate}
+    \item \textbf{GFlowNet 多温度}(主多样性源)
+    \item \textbf{Retrieval k-NN}(case-based,稳)
+    \item \textbf{Composition fallback}(规则保险)
+    \item \textbf{ExtraTrees baseline}(监督学习独立)
+\end{enumerate}
+
+\textbf{核心思想}:任何一源给出合理候选,后面 Stage35 都能挑出来。这是 SynPred 在 OOD 目标上不至于完全崩盘的关键工程冗余。
+
+\subsection{STEP 14 · \code{rerank\_stage2\_by\_elements}}
+
+公式:
+\begin{equation}
+\text{score}(\mathcal P, \text{target}) = 20\cdot \text{cov}(\mathcal P, \text{target}) - 5\cdot |\text{extra metals}| - 0.01\cdot \text{rank}_{\text{src}}
+\end{equation}
+
+\begin{repobox}[可重复要点 \#5]
+覆盖权重 20 vs penalty 5 vs rank 0.01 比例失衡是有意的——\textbf{化学正确性 $\gg$ 排序新鲜度}。一个 cov=0.5 的候选(score = 10)永远赢一个 cov=0.0 但原 rank=1 的(score = $-0.01$)。
+\end{repobox}
+
+\subsection{STEP 15 · \code{fix\_stage2\_global\_rank}}
+
+合并去重后,\code{rank} 列可能不连续(被去掉的 set 留 gap)。这一步把 rank 重赋为 $[1, 2, \ldots, n]$。
+
+% --------------------------------------------------------------- §4
+\section{STEP 16--19:Stage3 条件预测}
+
+\subsection{STEP 16 · \code{build\_stage3\_features}}
+
+同 STEP 5,但 \code{--task stage3}。\file{05\_build\_hybrid\_features\_infer.py} 内部按 \code{--task stage2|stage3} 选不同 column 子集。
+
+\subsection{STEP 17 · \code{build\_stage3\_conditioned\_table}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/05c_build_stage3_conditioned_feature_table_infer.py \
+  --infer_hybrid_csv      <stage3_train_hybrid.csv> \
+  --stage2_candidates_csv <stage2_final_csv> \
+  --schema_json           <stage3_schema_json> \
+  --output_csv <work_dir>/stage3_conditioned_x_*.csv \
+  --max_stage2_candidates 30
+\end{lstlisting}
+
+\textbf{展开}:每个 sample $\times$ 每个 Stage2 候选 $\to$ 一行。文件大小放大 30$\times$。
+
+\subsection{STEP 18 · \code{run\_stage3\_flow}(默认关)}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/13_run_stage3_infer_mixture_flow_conditioned.py \
+  --conditioned_x_csv ... --schema_json ... \
+  --flow_ckpt <ckpt> --flow_script <model.py> \
+  --output_dir <out_dir>/stage3_condition_predictions_flow_*/ \
+  --top_k_conditions 5 --n_flow_samples 64 \
+  --device <device>
+\end{lstlisting}
+
+输出 \file{test\_candidates\_flat.csv}。
+
+\subsection{STEP 18b · \code{run\_stage3\_lgbm}(默认开,主力)}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/13b_run_stage3_infer_lgbm_quantile.py \
+  --conditioned_x_csv ... --schema_json ... \
+  --temp_model_dir <runs/stage3/lgbm_quantile_ensemble_v2_fulldata/temperature> \
+  --time_model_dir <runs/stage3/lgbm_quantile_ensemble_v2_fulldata/time> \
+  --atm_model         <model_atmosphere_binary_final.txt> \
+  --time_bucket_model <model_time_bucket.txt> \
+  --output_dir <out_dir>/stage3_condition_predictions_lgbm/ \
+  --top_k_conditions 5
+\end{lstlisting}
+
+\subsection{STEP 19 · \code{compare\_stage3\_models}}
+
+如果同时跑了 flow + lgbm,算两份预测的 mean / std / min / max,按 precursor\_set group 算 top-1 温度的 absolute diff,写入 \file{stage3\_model\_comparison.md}。
+
+% --------------------------------------------------------------- §5
+\section{STEP 20--26:路线汇总与 Stage35 排序}
+
+\subsection{STEP 20 · \code{summarize\_routes}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/12_summarize_structure_to_routes.py \
+  --stage3_flat_csv <flow_flat_csv> \
+  --output_dir <out_dir>/routes_*/ \
+  --top_n 100
+\end{lstlisting}
+
+\subsection{STEP 21 · \code{filter\_display\_routes}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/src/14_filter_synthesis_routes_for_display.py \
+  --input_csv <readable.csv> \
+  --output_csv <display_filtered.csv> \
+  --min_temperature_c 300 --max_temperature_c 1600 \
+  --min_time_h 0.1 --max_time_h 240 \
+  --top_n 30 --prefer_top_component_mean
+\end{lstlisting}
+
+\subsection{STEP 22--24 · 三种 reranker}
+
+详见 Part II。每一步在 csv 上加 \code{stage35\_<X>\_score / stage35\_<X>\_rank} 列,\textbf{非破坏}。任一缺脚本/缺模型则 \code{record\_degradation}。
+
+\subsection{STEP 25 · \code{best\_route\_per\_precursor}}
+
+\textbf{逻辑}:同一 \code{precursor\_set\_key} 下,所有 (温度, 时间) 候选选最佳一组。这避免最终展示给用户时出现"前驱物 a + 800°C + 12h"与"前驱物 a + 850°C + 10h"两条几乎相同的路线。
+
+\subsection{STEP 26 · \code{export\_final\_top\_routes}}
+
+按优先级 v21 > learned > rule > display 选最强 ranking 写到 \file{final\_top\_routes.csv}(详见 Part II)。
+
+% --------------------------------------------------------------- §6
+\section{STEP 27 · Reliability Layer(独立一层)}
+
+\subsection{设计意图}
+
+\begin{quote}
+\itshape 推断时间不确定性应该和排序分数解耦。
+\end{quote}
+
+Reliability layer 不改 ranking,只在 final csv 上\textbf{附加列}:置信度、警告、QC、distribution support。理由:
+\begin{itemize}
+    \item 排序信号是"哪条更优",置信度是"我们对这个排序有多确定"
+    \item 把不确定性塞进 score 会让"高 score + 低置信度"与"中 score + 高置信度"无法区分
+    \item 解耦后,UI 可以分两栏展示:\code{final\_route\_rank | confidence\_level}
+\end{itemize}
+
+\code{run\_reliability\_layer}(\file{steps\_reliability.py:1927-1984})按序调度 17 个子步骤,每个看 yaml 是否 enabled。
+
+\subsection{核心子步骤}
+
+\subsubsection{\code{run\_precursor\_qc}}
+
+\begin{lstlisting}[language=bash]
+python pipeline/scripts/qc_route_precursors.py \
+  --input_csv <final_top_routes.csv> \
+  --output_csv <final_top_routes_with_precursor_qc.csv> \
+  --top_n 30
+\end{lstlisting}
+
+逐个前驱物查 RDKit/SMILES/化学合理性,标注 \code{precursor\_qc\_level} $\in$ \{pass, minor\_warning, major\_warning\} 与具体警告。
+
+\subsubsection{\code{attach\_route\_confidence}}
+
+核心公式:
+\begin{align}
+\text{score} = & \;0.30\cdot \text{element} + 0.18\cdot \text{rank} + 0.17\cdot \text{cond\_model} \nonumber \\
+& + 0.17\cdot \text{cond\_rule} + 0.08\cdot \text{prob} + 0.10\cdot \text{route\_score}
+\end{align}
+
+\begin{itemize}
+    \item \code{element\_score} = element\_coverage $-$ min(0.6, $0.2 \times$ missing\_count) $-$ min(0.4, $0.1 \times$ extra\_penalty)
+    \item \code{rank\_score} = $1 - $ precursor\_rank / max\_rank
+    \item \code{cond\_model} = stage3\_score(归一化)
+    \item \code{cond\_rule} = 物理合理性
+    \item \code{prob} = stage35\_v2\_prob(权重小,calibration 不好)
+    \item \code{route\_score\_component} = stage35\_v21\_score / 12.0(归一化压缩)
+\end{itemize}
+
+\textbf{阈值映射}:
+\begin{itemize}
+    \item $\geq 0.78 \to$ \code{high\_confidence} / \code{recommended}
+    \item $\geq 0.58 \to$ \code{medium\_confidence} / \code{recommended\_with\_validation}
+    \item $< 0.58 \to$ \code{low\_confidence} / \code{review\_required}
+\end{itemize}
+
+\textbf{硬规则修正}:
+\begin{itemize}
+    \item element\_coverage $< 0.5$ OR missing\_count $\geq 2 \to$ 强制 \code{low\_confidence}
+    \item 含 \code{extreme\_high\_temperature\_warning} 或 \code{too\_long\_time\_warning} $\to$ high $\to$ medium
+    \item 警告级别:无警告 / 含致命警告 $\to$ major / 其余 $\to$ minor
+\end{itemize}
+
+\subsubsection{\code{attach\_stage3\_condition\_reference\_support}}
+
+把 stage3 训练数据集里"实际观测到的 (材料族, 温度, 时间)"作为参考库,推理路线查"训练库里 $\pm 15$°C 范围有没有相似材料合成?",标 \code{condition\_reference\_support\_level} $\in$ \{strong, weak, none\}。
+
+\subsubsection{\code{add\_condition\_distribution\_confidence}}
+
+在所有训练样本的 (温度, 时间) 二维分布上,看推理路线落在 KDE "body"(高密度区)还是 "tail"(低密度区):
+\begin{itemize}
+    \item body $\to$ high score
+    \item tail $\to$ low score(模型在分布尾部预测不确定性大)
+\end{itemize}
+
+\subsubsection{\code{audit\_condition\_diversity}}
+
+\textbf{审计}:同一 sample 的 30 条候选路线,温度范围多大?如果都在 $\pm 20$°C 内,Stage3 模型可能崩。这一步只统计、不修改 ranking。
+
+\subsubsection{\code{postprocess\_confidence\_with\_precursor\_qc}}
+
+把 \code{precursor\_qc\_level} 与 \code{route\_confidence\_level} 联动:precursor major\_warning $\to$ confidence $-0.15$,minor $\to$ $-0.05$,严重时强制 \code{review\_required}。
+
+\subsubsection{V3 / V43 后置 reranker}
+
+详见 Part II:
+\begin{itemize}
+    \item \code{build\_joint\_route\_features} + \code{apply\_v3\_joint\_route\_rerank}
+    \item \code{build\_v3\_learned\_ranker\_dataset} + \code{apply\_v3\_learned\_ranker}
+    \item \code{add\_v43\_route\_template\_features} + \code{apply\_v43\_template\_ranker} + \code{apply\_v43\_safe\_strict\_gate}
+\end{itemize}
+
+\subsubsection{\code{finalize\_recommended\_routes}}
+
+\textbf{最末端}:从所有可用 final csv 中选最强,统一字段名,生成 \file{final\_recommended\_routes.csv} + \file{.md} + \file{.json}。
+
+\subsection{\code{\_get\_current\_csv} 模式}
+
+reliability 层各 step 的输入选择按 fallback chain。每完成一步 enrichment,\code{\_set\_current\_csv(r, output\_csv)} 更新 \code{final\_top\_routes\_current\_csv} 为本步输出。下一步从这继续。这让"步骤可任意 enable/disable + 任意删除中间产物"都不破坏链路。
+
+% --------------------------------------------------------------- §7
+\section{STEP 28 · \code{select\_final\_recommended\_routes}}
+
+\textbf{优先级}:
+\begin{enumerate}
+    \item v4.3 template-aware chem-only
+    \item v3 learned reranker
+    \item v3 joint reranker
+    \item confidence route table
+    \item original final\_top\_routes
+\end{enumerate}
+
+\textbf{关键}:\textbf{不删除、不覆盖历史输出},只创建一个稳定别名 \file{final\_recommended\_routes.csv} + \file{.md} 指向当前最强可用版本。这让用户拿同一个文件名总能读到"当前最佳"路线表。
+
+\code{r.outputs["final\_recommended\_routes\_source"]} 记录究竟用了哪一档,写入 manifest。
+
+% --------------------------------------------------------------- §8
+\section{端到端复现指南}
+
+\subsection{环境}
+
+\begin{lstlisting}[language=bash]
+# Python 3.10+
+pip install numpy pandas scikit-learn torch yaml lightgbm joblib
+pip install pymatgen ase matminer chgnet     # 结构 + GNN
+pip install rdkit                             # QC (precursor)
+\end{lstlisting}
+
+\subsection{单 target 跑}
+
+\begin{lstlisting}[language=bash]
+PR=/Users/wyc/SynPred
+TASK=demo_poscar_test
+mkdir -p $PR/data/poscar/$TASK
+cp my_target.vasp $PR/data/poscar/$TASK/
+
+cd $PR/scripts/07_infer/structure_to_synthesis_route/pipeline
+python run_pipeline.py \
+  --config configs/full_route_stage3.yaml \
+  --infer_name $TASK \
+  --project_root $PR
+
+ls $PR/outputs/inference/$TASK/out_dir/routes_*/
+# 找:final_recommended_routes.csv / .md
+\end{lstlisting}
+
+\subsection{断点续跑}
+
+\begin{lstlisting}[language=bash]
+# 假设 STEP 19 (compare_stage3_models) 跑崩,前面都好
+python run_pipeline.py \
+  --config configs/full_route_stage3.yaml \
+  --infer_name $TASK \
+  --start_from compare_stage3_models
+\end{lstlisting}
+
+\subsection{单步调试}
+
+\begin{lstlisting}[language=bash]
+python run_pipeline.py \
+  --config configs/full_route_stage3.yaml \
+  --infer_name $TASK \
+  --only_step stage35_v21_rerank
+\end{lstlisting}
+
+\subsection{常见坑}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{lXX}
+\toprule
+现象 & 原因 & 解 \\
+\midrule
+preflight 失败 & ckpt 路径错 & 检查 yaml \code{stage2.gflownet\_ckpt} 等 \\
+\code{KeyError: graph\_emb\_0} & \code{--embedding\_prefix} 不对 & 看 csv 列名,默认 \code{chgnet\_<i>} 需要 prefix=chgnet \\
+Stage2 候选全空 & composition\_biased 太严 & 调小 \code{target\_hit\_bonus},关 \code{drop\_zero\_overlap} \\
+NPZ 标准化报错 & template\_dir 与训练期不一致 & 训练 gold\_only,推理也 gold\_only \\
+\code{flow\_flat\_csv} 空 & flow ckpt 缺 & \code{steps.run\_stage3\_flow=false} \\
+V21 维度不匹配 & feature\_cols.json 不配套 & 替换为同 run 的 \\
+reliability 抛 & route\_out\_dir 不存在 & 检查 STEP 26 是否成功 \\
+内存爆 & $100 \times 5 \times 30$ 行 OOM & 调 \code{n\_flow\_samples 32}, batch\_size 64 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% --------------------------------------------------------------- §9
+\section{设计哲学}
+
+\subsection{八条工程取舍}
+
+\begin{enumerate}
+    \item \textbf{没有大一统模型,而是异质源 + 多层 reranker}:GFlowNet/Flow 给"多样性 + 覆盖率",GBDT/ExtraTrees 给"判别力 + 稳定性",规则 / 模板给"先验"。
+    \item \textbf{数据划分按 DOI/material-group}:避免同一篇论文样本被切到 train/test。
+    \item \textbf{Train mode 三件套}:\code{relaxed\_only / gold\_only / curriculum}。生产路径:\code{gflownet\_joint\_rerank\_hybrid\_gold\_only\_v1}。
+    \item \textbf{Stage3 模型不直接预测条件值,而是 baseline + 残差 mixture}:解耦"先验均值估计"与"分布形状学习"。
+    \item \textbf{元素约束多重保险}:解码期 + 后置硬过滤 + 重排公式 + GFlowNet reward,同一先验在不同位置生效。
+    \item \textbf{可靠性层独立成一层}:排序分数 $\neq$ 置信度。
+    \item \textbf{Sort + Annotate, never destroy}:每个 reranker / reliability step 只新增列。
+    \item \textbf{配置驱动 + 模板插值 + override}:一份 yaml 配整套。
+\end{enumerate}
+
+\subsection{与"标准"机器学习 pipeline 的差异}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+维度 & 普通 ML pipeline & SynPred Stage 07 \\
+\midrule
+模型数 & 1 个端到端 & 6+ 个异质模型 \\
+失败模式 & 一处崩全崩 & 任何一处崩 $\to$ degrade \\
+排序信号 & 一个 score & rule, learned, v21, v3, v43 五种共存 \\
+可解释 & 黑盒 & 每步独立 csv \\
+Reproducibility & 重跑可能不一致 & manifest 记录所有产物 \\
+调试 & 改代码 + 全量重跑 & --only\_step / --start\_from 单步 \\
+用户接口 & 一个数 & 多档 confidence + warnings + QC \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{可改进点}
+
+\begin{enumerate}[label=(\alph*)]
+    \item reliability\_layer 17 个子函数耦合在一个 1984 行文件里,可拆成 sub-pipeline。
+    \item Stage2/3/35 之间的中间 csv 是 flat 表格,跨 step 重新读写。可用 parquet + 内存共享。
+    \item manifest 没有 hash —— 同一份输入跑两次,manifest 比对不出"产物是否真的一致"。可加 file hash。
+    \item degradation 不分级 —— "CGCNN 缺"与"Flow ckpt 缺"同样写,但影响差异大。可加 \code{severity}。
+    \item 没有 stage2 candidate diversity audit。
+    \item 没有 dry-run 模式,可加 \code{--dry\_run}。
+\end{enumerate}
+
+% --------------------------------------------------------------- §10
+\section{结语}
+
+Stage 07 是 SynPred 的最终交付层。28 个 step 串起 4000 行代码,把"一份 POSCAR"变成"一份带置信度 + QC + 警告的合成路线推荐表"。
+
+整个流水线的工程哲学可以一句话概括:\textbf{让多个不完美的模型协同输出一份"足够可靠"的推荐}。生成模型给广度,监督模型给深度,规则给先验,reranker chain 给精度,reliability layer 给可信度。任何单一组件都不够好,但合起来就能用。
+
+流水线最大的优势是\textbf{优雅降级 + 可审计 + 可断点}——任何一环失效,流程不崩;任何一个决策,都能定位到具体 csv 行;任何一次失败,都能从那一步重启。这三点让 SynPred 在生产环境真正"可用"。
+
+Stage 07 的契约只有两条:\textbf{\code{\{infer\_name\}} 隔离的 outputs 目录 + \file{pipeline\_v3\_manifest.json} 自描述}。下游(用户、UI、Dashboard、监控)只要会读这两样东西,就能完整重建任意一次推理的所有状态、所有产物、所有降级原因。这是工程"可靠性"的根本——所有信息可见、可追溯、可还原。

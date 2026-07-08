@@ -1,0 +1,744 @@
+03_build_chgnet_cache_stage2.py 详细讲解
+=============================================
+
+一、脚本的总体定位
+------------------
+
+一句话总结：
+这个脚本的作用是为 stage2 任务构建 CHGNet-ready 的结构缓存。它从 stage2 的 split JSONL 中读取样本，解析 POSCAR，提取后续 CHGNet 建模最需要的结构原始载荷，同时构造 stage2 的前驱体多标签监督信号 y，最终将这些信息打包保存为 .pkl 文件，供后续 CHGNet 模型训练或图嵌入导出使用。
+
+可以把它在整体流程中的位置理解为：
+
+stage2 split JSONL
+  ↓
+03_build_chgnet_cache_stage2.py
+  ↓
+chgnet_stage2/<train_mode>/
+  ├─ train.pkl
+  ├─ val.pkl
+  ├─ test.pkl
+  ├─ gold_train_holdout.pkl
+  ├─ precursor_vocab.json
+  └─ summary.json
+  ↓
+后续 CHGNet 训练 / embedding 导出
+  ↓
+stage2_*_graph_embed.csv
+  ↓
+05_build_hybrid_features.py
+
+因此，这个脚本属于 stage2 图路线中的中间缓存准备脚本，而不是最终 embedding CSV 导出脚本。
+
+------------------------------------------
+二、它与 CGCNN / ALIGNN 脚本的关系
+------------------------------------------
+
+你现在 stage2 图路线实际上已经有三种缓存脚本：
+
+1. 01_build_cgcnn_graph_cache.py
+- 直接构建局域邻接图
+- 输出 edge_src / edge_dst / edge_dist
+- 更接近“图已经建好”的缓存
+
+2. 03_build_alignn_cache_stage2.py
+- 不直接构建 dgl 图
+- 只缓存后续 ALIGNN 最常用的结构原始载荷
+- 更接近“延迟构图”的缓存
+
+3. 03_build_chgnet_cache_stage2.py
+- 也不直接导出 embedding
+- 保存 CHGNet 建模最需要的结构载荷
+- 并且比 ALIGNN 版多保留一些几何摘要信息
+
+因此，你可以把 CHGNet 版理解为：
+
+CHGNet-ready payload cache
+= 结构原始载荷 + 晶格几何摘要 + stage2 多标签监督
+
+------------------------------------------
+三、这个脚本最重要的设计特点
+------------------------------------------
+
+这个脚本的设计特点主要有两点：
+
+1. 不做最终 embedding 导出
+它只生成后续 CHGNet 路线会用到的 .pkl 缓存，而不是 graph_embed.csv。
+
+2. 比 ALIGNN 版多保留了晶格几何摘要
+除了：
+- atomic_numbers
+- frac_coords
+- cart_coords
+- lattice
+- nsites
+
+它还额外保存：
+- lattice_lengths
+- lattice_angles
+- volume
+
+这说明这个脚本不是简单复制 ALIGNN 版，而是确实考虑了 CHGNet 更偏向材料结构建模的一些需求。
+
+------------------------------------------
+四、输入与输出
+------------------------------------------
+
+1. 输入目录
+默认输入目录为：
+
+/Users/wyc/MP_exp_doi/data/interim/splits/structdesc_splits
+
+会读取：
+- stage2_train.jsonl
+- stage2_val.jsonl
+- stage2_test.jsonl
+- stage2_gold_train_holdout.jsonl
+
+其中 train 实际选择哪一个文件，取决于 train_mode。
+
+2. 输出目录
+如果不提供 --output_dir，则默认输出到：
+
+base_dir / "interim" / "graph_cache" / "chgnet_stage2" / train_mode
+
+例如：
+.../data/interim/graph_cache/chgnet_stage2/relaxed_only
+
+3. 词表输入
+优先尝试读取：
+
+/Users/wyc/MP_exp_doi/data/interim/features/structdesc_features/meta/precursor_vocab.json
+
+如果这个文件不存在，则回退为从 train split 中构建 precursor vocab。
+
+4. 输出文件
+通常包括：
+- train.pkl
+- val.pkl
+- test.pkl
+- gold_train_holdout.pkl
+- precursor_vocab.json
+- summary.json
+
+------------------------------------------
+五、train_mode 机制
+------------------------------------------
+
+这个脚本支持以下 train_mode：
+
+- relaxed_only
+- gold_only
+- curriculum_phase1
+- curriculum_phase2
+
+其作用是：
+决定 train split 用哪一个 JSONL 文件。
+
+逻辑与 stage2 的其他 graph cache 脚本一致：
+
+1. relaxed_only
+train = stage2_train.jsonl
+
+2. gold_only
+train = stage2_gold_train_holdout.jsonl
+
+3. curriculum_phase1
+train = stage2_train.jsonl
+
+4. curriculum_phase2
+train = stage2_gold_train_holdout.jsonl
+
+而 val/test/gold_train_holdout 固定为：
+- stage2_val.jsonl
+- stage2_test.jsonl
+- stage2_gold_train_holdout.jsonl
+
+因此，这个脚本与已有 stage2 训练模式体系保持一致。
+
+------------------------------------------
+六、split 路径选择：select_split_paths
+------------------------------------------
+
+函数：
+select_split_paths(input_dir, train_mode)
+
+作用：
+根据 train_mode 决定 train / val / test / gold_train_holdout 四个 split 对应的 JSONL 文件路径。
+
+逻辑如下：
+
+- relaxed_only -> train 用 stage2_train.jsonl
+- gold_only -> train 用 stage2_gold_train_holdout.jsonl
+- curriculum_phase1 -> train 用 stage2_train.jsonl
+- curriculum_phase2 -> train 用 stage2_gold_train_holdout.jsonl
+
+然后固定：
+- val = stage2_val.jsonl
+- test = stage2_test.jsonl
+- gold_train_holdout = stage2_gold_train_holdout.jsonl
+
+这一点说明：
+这个脚本在实验设计层面与 CGCNN / ALIGNN 路线是一致的。
+
+------------------------------------------
+七、基础工具函数
+------------------------------------------
+
+1. ensure_dir(path)
+递归创建目录。
+
+2. write_json(path, obj)
+把 Python 对象写成 JSON 文件，主要用于写 precursor_vocab.json 和 summary.json。
+
+3. read_json(path)
+读取普通 JSON 文件。
+
+4. read_jsonl(path)
+读取 JSONL 文件，每一行解析成 dict。
+
+5. normalize_list_like(v)
+将各种格式的 main_precursors 统一转换为 List[str]。
+支持：
+- list
+- JSON 字符串
+- 逗号分隔字符串
+- 分号分隔字符串
+- 单字符串
+
+这一函数的意义在于：
+无论上游的 main_precursors 是什么写法，最终都能统一成后续多标签构造所需的标准列表。
+
+------------------------------------------
+八、precursor vocab 的处理：load_precursor_vocab
+------------------------------------------
+
+函数：
+load_precursor_vocab(path, train_rows)
+
+作用：
+优先从固定 JSON 读取 precursor vocab；如果文件不存在，则从当前 train_rows 中构建。
+
+逻辑如下：
+
+1. 如果 path 存在：
+- 读取 JSON
+- 检查是否为非空 list
+- 转成字符串列表
+
+2. 如果 path 不存在：
+- 遍历 train_rows
+- 从每条样本的 main_precursors 中收集所有前驱体
+- 去重、排序
+- 得到 precursor vocab
+
+如果最终 vocab 为空，则报错。
+
+这一机制的作用是：
+尽量保持图路线与 descriptor 路线的标签空间一致。
+
+尤其当你提供固定的 precursor_vocab.json 时，可以确保：
+- 表格模型
+- CGCNN
+- ALIGNN
+- CHGNet
+
+使用的是同一套前驱体标签定义。
+
+------------------------------------------
+九、前驱体多标签构建：build_multihot
+------------------------------------------
+
+函数：
+build_multihot(main_precursors, precursor_to_idx)
+
+作用：
+把当前样本的 main_precursors 转换为一个 multi-hot 向量。
+
+例如：
+如果 precursor vocab 长度为 120，当前样本含有其中第 4 和第 30 个前驱体，则对应位置置 1，其余为 0。
+
+输出 dtype 为：
+np.float32
+
+说明这个标签向量更偏向于后续直接送入神经网络训练，而不是仅用于离散存档。
+
+------------------------------------------
+十、元素映射：symbol_to_atomic_number
+------------------------------------------
+
+函数：
+symbol_to_atomic_number(sym)
+
+作用：
+将元素符号映射为原子序数。
+
+例如：
+- H -> 1
+- O -> 8
+- Fe -> 26
+- Ni -> 28
+
+如果遇到未知元素，会抛出错误。
+
+这一部分的作用与其他 graph cache 脚本一致，是最基础的节点原子类型表示。
+
+------------------------------------------
+十一、POSCAR 解析：parse_poscar
+------------------------------------------
+
+函数：
+parse_poscar(path)
+
+作用：
+解析 POSCAR 文件，并提取构建 CHGNet-ready payload 所需的结构信息。
+
+解析流程包括：
+
+1. 读取所有非空行
+2. 检查 POSCAR 行数是否足够
+3. 解析缩放因子 scale
+4. 解析 3×3 晶格矩阵 lattice
+5. 读取元素 species 和 counts
+6. 检查 species 与 counts 是否匹配
+7. 处理 Selective Dynamics 行
+8. 读取坐标模式（Direct / Cartesian）
+9. 读取 nsites 个原子坐标
+10. 若为 Cartesian 坐标，则转换为 frac_coords
+11. 计算 cart_coords = frac @ lattice
+12. 扩展每个原子的 species
+13. 将 species 映射成 atomic_numbers
+
+最终返回：
+- lattice
+- frac_coords
+- cart_coords
+- species
+- atomic_numbers
+- nsites
+
+这个函数说明：
+CHGNet 缓存的基础仍然是一个尽可能完整的结构原始表示。
+
+------------------------------------------
+十二、晶格几何摘要：lattice_to_lengths_angles
+------------------------------------------
+
+函数：
+lattice_to_lengths_angles(lattice)
+
+这是 CHGNet 脚本相较于 ALIGNN 脚本最关键的新增部分之一。
+
+作用：
+从 3×3 晶格矩阵中提取：
+
+1. 三条晶格边长度：
+- a
+- b
+- c
+
+2. 三个晶格夹角：
+- alpha = angle(b, c)
+- beta = angle(a, c)
+- gamma = angle(a, b)
+
+输出：
+- lengths = [a, b, c]
+- angles = [alpha, beta, gamma]
+
+这一部分的意义非常大，因为：
+
+- CHGNet 及类似结构模型通常会频繁使用晶格几何摘要信息
+- 直接缓存 lengths / angles 比后续重复从 lattice 计算更方便
+- 有助于做结构检查、输入变换或额外特征使用
+
+------------------------------------------
+十三、CHGNet-ready payload：build_chgnet_ready_payload
+------------------------------------------
+
+函数：
+build_chgnet_ready_payload(struct)
+
+这是整个脚本最核心的函数之一。
+
+它会从 parse_poscar 返回的结构 dict 中提取：
+
+- atomic_numbers
+- frac_coords
+- cart_coords
+- lattice
+- lattice_lengths
+- lattice_angles
+- volume
+- nsites
+
+其中：
+- lattice_lengths 来自 lattice_to_lengths_angles(struct["lattice"])
+- lattice_angles 来自 lattice_to_lengths_angles(struct["lattice"])
+- volume = |det(lattice)|
+
+这说明 CHGNet-ready payload 不只是“把结构原始载荷存下来”，还显式加入了几何摘要量。
+
+因此，相比 ALIGNN 版：
+这个 payload 更贴近 CHGNet 这种面向材料结构建模的模型输入需求。
+
+------------------------------------------
+十四、单个 split 的处理：process_split
+------------------------------------------
+
+函数：
+process_split(split_name, rows, out_path, precursor_to_idx, max_sites)
+
+作用：
+对某个 split（例如 train）中的全部样本，逐条解析结构、构造标签、构建 CHGNet-ready payload，并写出为一个 .pkl 缓存。
+
+具体流程如下：
+
+1. 初始化统计量
+包括：
+- dropped_missing_poscar
+- dropped_bad_poscar
+- dropped_too_many_sites
+- dropped_empty_label
+
+2. 遍历每条 row
+
+对每一条样本：
+
+(1) 检查 poscar_path
+若缺失或文件不存在：
+- dropped_missing_poscar += 1
+- continue
+
+(2) 规范化 main_precursors
+调用 normalize_list_like(row.get("main_precursors"))
+
+(3) 构造多标签 y
+调用 build_multihot(main_precursors, precursor_to_idx)
+若 y 全零：
+- dropped_empty_label += 1
+- continue
+
+(4) 解析 POSCAR
+调用 parse_poscar()
+若失败：
+- dropped_bad_poscar += 1
+- continue
+
+(5) 检查 nsites
+若结构原子数超过 max_sites：
+- dropped_too_many_sites += 1
+- continue
+
+(6) 构造 CHGNet-ready payload
+调用 build_chgnet_ready_payload(struct)
+
+(7) 打包缓存样本
+最终样本包含：
+- id
+- material_id
+- formula
+- doi
+- split_group
+- main_precursors
+- y
+- poscar_path
+- atomic_numbers
+- frac_coords
+- cart_coords
+- lattice
+- lattice_lengths
+- lattice_angles
+- volume
+- nsites
+
+3. 将全部 kept 样本写入 out_path（pickle）
+
+4. 返回统计 summary
+
+因此，process_split 是：
+“stage2 -> CHGNet-ready 监督缓存”的核心构建函数。
+
+------------------------------------------
+十五、缓存样本里实际保存了什么
+------------------------------------------
+
+每条缓存样本大致长这样：
+
+{
+  "id": ...,
+  "material_id": ...,
+  "formula": ...,
+  "doi": ...,
+  "split_group": ...,
+  "main_precursors": [...],
+  "y": ...,
+  "poscar_path": "...",
+  "atomic_numbers": ...,
+  "frac_coords": ...,
+  "cart_coords": ...,
+  "lattice": ...,
+  "lattice_lengths": ...,
+  "lattice_angles": ...,
+  "volume": ...,
+  "nsites": ...
+}
+
+这说明缓存中包含三类信息：
+
+1. 样本元信息
+- id
+- material_id
+- formula
+- doi
+- split_group
+- poscar_path
+
+2. 监督信息
+- main_precursors
+- y
+
+3. CHGNet-ready 结构载荷
+- atomic_numbers
+- frac_coords
+- cart_coords
+- lattice
+- lattice_lengths
+- lattice_angles
+- volume
+- nsites
+
+因此，这个缓存本质上是：
+“stage2 多标签监督 + CHGNet-ready 结构表征”的统一打包。
+
+------------------------------------------
+十六、主程序：main()
+------------------------------------------
+
+main() 的整体流程如下：
+
+1. 解析参数
+包括：
+- base_dir
+- input_dir
+- output_dir
+- train_mode
+- precursor_vocab_json
+- max_sites
+
+2. 确定输出目录
+若没有提供 output_dir，则默认使用：
+base_dir/interim/graph_cache/chgnet_stage2/<train_mode>
+
+3. 创建输出目录
+
+4. 根据 train_mode 调用 select_split_paths()
+得到 train/val/test/gold_train_holdout 的 JSONL 路径
+
+5. 读取各 split 的 JSONL 行
+
+6. 加载或构建 precursor vocab
+调用 load_precursor_vocab(vocab_json, split_rows["train"])
+
+7. 构造 precursor_to_idx
+
+8. 写出 precursor_vocab.json
+
+9. 对每个 split 调用 process_split()
+输出：
+- train.pkl
+- val.pkl
+- test.pkl
+- gold_train_holdout.pkl
+
+10. 写出 summary.json
+
+11. 将 summary 打印到终端
+
+因此，main() 完成了一个比较完整的 stage2 CHGNet 缓存构建流水线。
+
+------------------------------------------
+十七、summary.json 的意义
+------------------------------------------
+
+这个脚本输出的 summary.json 通常包括：
+
+1. config
+- base_dir
+- input_dir
+- output_dir
+- train_mode
+- precursor_vocab_json
+- max_sites
+
+2. split_paths
+- train
+- val
+- test
+- gold_train_holdout
+各自实际使用的 JSONL 路径
+
+3. precursor_vocab_size
+前驱体词表大小
+
+4. precursor_vocab_path
+输出词表路径
+
+5. splits
+每个 split 的：
+- input_rows
+- kept
+- dropped_missing_poscar
+- dropped_bad_poscar
+- dropped_too_many_sites
+- dropped_empty_label
+- output_pkl
+
+这个 summary 的作用很大，因为它能帮助你快速判断：
+- POSCAR 问题是否导致大量样本损失
+- 是否有很多样本因为标签为空被过滤
+- 不同 train_mode 下训练集规模如何变化
+- CHGNet 路线的缓存规模是否合理
+
+------------------------------------------
+十八、它和 hybrid 的关系
+------------------------------------------
+
+这一点依然需要非常明确：
+
+这个脚本输出的是：
+- train.pkl
+- val.pkl
+- test.pkl
+等缓存文件
+
+而 05_build_hybrid_features.py 需要的是：
+- stage2_train_graph_embed.csv
+- stage2_val_graph_embed.csv
+- ...
+
+所以它并不是 hybrid 的直接输入。
+
+正确关系应当是：
+
+03_build_chgnet_cache_stage2.py
+  ↓
+得到 chgnet_stage2/<mode>/*.pkl
+  ↓
+后续 CHGNet 模型训练 / 前向传播
+  ↓
+导出 stage2_*_graph_embed.csv
+  ↓
+05_build_hybrid_features.py
+  ↓
+生成 hybrid 特征表
+
+因此，这个脚本只是：
+“stage2 CHGNet 路线中的中间缓存准备阶段”。
+
+------------------------------------------
+十九、它和 ALIGNN 版最大的区别
+------------------------------------------
+
+相比于 `03_build_alignn_cache_stage2.py`，这个脚本最大的不同在于：
+
+1. ALIGNN 版主要保存：
+- atomic_numbers
+- frac_coords
+- cart_coords
+- lattice
+- nsites
+
+2. CHGNet 版额外保存：
+- lattice_lengths
+- lattice_angles
+- volume
+
+这说明 CHGNet 版更强调晶格的几何摘要。
+
+从模型设计角度看，这很合理，因为 CHGNet 往往更偏向材料晶体结构的物理表征，明确缓存这些量能减少后续结构恢复和几何计算的重复开销。
+
+------------------------------------------
+二十、什么时候需要先跑它
+------------------------------------------
+
+如果你后续想做下面这些事情，那么通常都应先跑它：
+
+1. 训练 stage2 的 CHGNet 模型
+2. 导出 stage2 的 CHGNet embedding
+3. 构建 stage2 的 descriptor + CHGNet hybrid features
+
+一个典型命令（如果你现在在 SynPred 路径下）可能是：
+
+python 03_build_chgnet_cache_stage2.py \
+  --base_dir /Users/wyc/SynPred/data \
+  --input_dir /Users/wyc/SynPred/data/interim/splits/structdesc_splits \
+  --train_mode relaxed_only \
+  --precursor_vocab_json /Users/wyc/SynPred/data/interim/features/structdesc_features/meta/precursor_vocab.json \
+  --output_dir /Users/wyc/SynPred/data/interim/graph_cache/chgnet_stage2/relaxed_only
+
+------------------------------------------
+二十一、这个脚本的价值
+------------------------------------------
+
+这个脚本的核心价值主要体现在：
+
+1. 为 stage2 提供 CHGNet 路线的数据缓存入口
+让你不仅有 CGCNN 和 ALIGNN，也有 CHGNet 的图路线。
+
+2. 与 descriptor 路线共享统一标签空间
+通过复用 precursor_vocab.json，保持图模型与表格模型标签定义一致。
+
+3. 保留更完整的几何摘要
+比 ALIGNN 版多保存 lengths / angles / volume，更贴近 CHGNet 结构需求。
+
+4. 保持 train_mode 兼容
+使得 relaxed_only / gold_only / curriculum 的实验设计在 CHGNet 路线上同样可行。
+
+------------------------------------------
+二十二、局限与注意点
+------------------------------------------
+
+1. 这不是 embedding 导出脚本
+跑完后不会直接生成 graph_embed.csv。
+
+2. 它不会直接构建最终 CHGNet 模型对象
+而只是提供 CHGNet-ready 的结构载荷。
+
+3. 仍然依赖 precursor_vocab 的一致性
+如果 vocab_json 不正确，虽然可以回退构建，但可能与表格路线标签空间不一致。
+
+4. 依赖 poscar_path 的完整性
+路径错误或文件缺失会直接导致样本被丢弃。
+
+5. max_sites 会过滤掉大结构
+默认 256，对于超大晶胞结构可能会有一定损失。
+
+------------------------------------------
+二十三、最简版结论
+------------------------------------------
+
+03_build_chgnet_cache_stage2.py 的核心作用就是：
+
+为 stage2 构建 CHGNet-ready 的结构缓存，并同时保存前驱体多标签监督信号。
+
+它完成了四件关键事情：
+
+1. 根据 train_mode 选择 stage2 split
+2. 解析 POSCAR，提取 CHGNet 所需的结构载荷
+3. 构建 stage2 前驱体 multi-hot 标签
+4. 将结构载荷与标签一起保存为 .pkl
+
+而且相较于 ALIGNN 版，它额外缓存了：
+- lattice_lengths
+- lattice_angles
+- volume
+
+因此，它更贴近 CHGNet 的结构输入需求。
+
+------------------------------------------
+二十四、可直接引用的简短说明
+------------------------------------------
+
+可以将该脚本概括为：
+
+该脚本用于为 stage2 数据构建 CHGNet-ready 的结构缓存。它从 split JSONL 中读取样本，解析 POSCAR 结构文件，提取原子序数、分数坐标、笛卡尔坐标、晶格矩阵以及晶格长度、晶格角和体积等后续 CHGNet 建模所需的结构原始载荷，同时根据主前驱体集合构造多标签监督信号 y，最终将各 split 的样本打包保存为 .pkl 文件，以便后续开展 stage2 的 CHGNet 模型训练或图嵌入导出。

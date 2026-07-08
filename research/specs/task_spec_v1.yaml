@@ -1,0 +1,42 @@
+spec_version: task_spec_v1
+canonicalization_version: canonicalization_v1
+candidate_budget_version: candidate_budget_v1
+public_module_names:
+  rsp: Route Skeleton Proposer
+  cdg: Condition Distribution Generator
+  grv: Global Route Verifier
+terms:
+  route_specification: "method, canonical precursor set, and synthesis-condition tuple"
+  route_candidate: "one budgeted candidate route specification"
+  synthesis_recipe_specification: "recipe-level structured fields; not an ordered experimental procedure"
+tasks:
+  - task_id: e2e_route_specification_prediction
+    public_name: End-to-End Route Specification Prediction
+    input: x
+    output:
+      method: m
+      precursor_set: y
+      conditions: c=(T,tau,atmosphere,solvent)
+    method_oracle_allowed: false
+    primary_result: true
+  - task_id: method_conditioned_route_prediction
+    public_name: Method-Conditioned Route Prediction
+    input: (x,m)
+    output:
+      precursor_set: y
+      conditions: c=(T,tau,atmosphere,solvent)
+    method_oracle_allowed: true
+    primary_result: false
+  - task_id: oracle_context_component_evaluation
+    public_name: Oracle-Context Component Evaluation
+    input: oracle contexts such as true method, true precursor set, or candidate pool containing reference
+    output: component-level diagnostic metrics
+    method_oracle_allowed: true
+    primary_result: false
+constraints:
+  no_default_selector_update: true
+  no_test_for_tuning: true
+  fixed_candidate_budget_required: true
+  no_unbounded_cartesian_condition_expansion: true
+  top200_top500_appendix_only: true
+
