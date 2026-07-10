@@ -41,6 +41,7 @@ import json
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -72,11 +73,9 @@ def write_json(path: Path, obj: Any) -> None:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
-def run_command(cmd: str) -> None:
-    print(f"[RUN] {cmd}")
-    proc = subprocess.run(cmd, shell=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"Command failed with exit code {proc.returncode}: {cmd}")
+def run_command(cmd: List[str]) -> None:
+    print(f"[RUN] {shlex.join(cmd)}")
+    subprocess.run(cmd, check=True)
 
 
 def build_graph_cache_input(infer_jsonl: Path, graph_cache_input_dir: Path) -> Dict[str, Any]:
@@ -171,16 +170,16 @@ def main() -> None:
     if not chgnet_cache_script.exists():
         raise FileNotFoundError(f"Missing script: {chgnet_cache_script}")
 
-    cmd_cache = " ".join([
-        "python",
-        shlex.quote(str(chgnet_cache_script)),
-        "--input_dir", shlex.quote(str(graph_cache_input_dir)),
-        "--output_dir", shlex.quote(str(chgnet_cache_dir)),
-        "--train_mode", shlex.quote(str(args.train_mode)),
-        "--precursor_vocab_json", shlex.quote(str(precursor_vocab_json)),
+    cmd_cache = [
+        sys.executable,
+        str(chgnet_cache_script),
+        "--input_dir", str(graph_cache_input_dir),
+        "--output_dir", str(chgnet_cache_dir),
+        "--train_mode", str(args.train_mode),
+        "--precursor_vocab_json", str(precursor_vocab_json),
         "--max_sites", str(int(args.max_sites)),
         "--inference_mode",
-    ])
+    ]
     run_command(cmd_cache)
     summary["steps"]["chgnet_cache"] = {
         "script": str(chgnet_cache_script),
@@ -192,12 +191,12 @@ def main() -> None:
     if not export_script.exists():
         raise FileNotFoundError(f"Missing script: {export_script}")
 
-    cmd_export = " ".join([
-        "python",
-        shlex.quote(str(export_script)),
-        "--cache_dir", shlex.quote(str(chgnet_cache_dir)),
-        "--output_dir", shlex.quote(str(chgnet_embed_dir)),
-    ])
+    cmd_export = [
+        sys.executable,
+        str(export_script),
+        "--cache_dir", str(chgnet_cache_dir),
+        "--output_dir", str(chgnet_embed_dir),
+    ]
     run_command(cmd_export)
     summary["steps"]["chgnet_export"] = {
         "script": str(export_script),

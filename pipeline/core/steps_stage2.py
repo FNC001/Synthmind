@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import subprocess
+import sys
 from pathlib import Path
 import pandas as pd
 
@@ -171,6 +172,8 @@ def sample_stage2_gflownet(r):
 
 
 def _run_cmd(cmd):
+    if cmd and str(cmd[0]) == "python":
+        cmd = [sys.executable, *cmd[1:]]
     print("[RUN]", " ".join(str(x) for x in cmd))
     subprocess.run([str(x) for x in cmd], check=True)
 
@@ -196,6 +199,15 @@ def _cfg_get(r, key, default=None):
                 return default
             cur = getattr(cur, part)
     return cur
+
+
+def _cfg_get_compat(r, key, legacy_key, default=None):
+    """Read the public config key while accepting the historical flattened key."""
+    marker = object()
+    value = _cfg_get(r, key, marker)
+    if value is not marker:
+        return value
+    return _cfg_get(r, legacy_key, default)
 
 
 def _project_root(r) -> Path:
@@ -256,11 +268,24 @@ def constrain_stage2_by_composition(r):
     _require_file(script, "composition constraint script")
     _require_file(input_csv, "stage2_sample_csv")
 
-    min_coverage = _cfg_get(r, "stage2.composition_constraint_min_coverage", 0.0)
-    coverage_weight = _cfg_get(r, "stage2.composition_constraint_coverage_weight", 20.0)
-    extra_penalty_weight = _cfg_get(r, "stage2.composition_constraint_extra_penalty_weight", 5.0)
-    rank_weight = _cfg_get(r, "stage2.composition_constraint_rank_weight", 0.01)
-    top_n_per_sample = _cfg_get(r, "stage2.composition_constraint_top_n_per_sample", 100)
+    min_coverage = _cfg_get_compat(
+        r, "composition_constraint.min_coverage", "stage2.composition_constraint_min_coverage", 0.0
+    )
+    coverage_weight = _cfg_get_compat(
+        r, "composition_constraint.coverage_weight", "stage2.composition_constraint_coverage_weight", 20.0
+    )
+    extra_penalty_weight = _cfg_get_compat(
+        r,
+        "composition_constraint.extra_penalty_weight",
+        "stage2.composition_constraint_extra_penalty_weight",
+        5.0,
+    )
+    rank_weight = _cfg_get_compat(
+        r, "composition_constraint.rank_weight", "stage2.composition_constraint_rank_weight", 0.01
+    )
+    top_n_per_sample = _cfg_get_compat(
+        r, "composition_constraint.top_n_per_sample", "stage2.composition_constraint_top_n_per_sample", 100
+    )
 
     cmd = [
         "python", script,
@@ -275,7 +300,14 @@ def constrain_stage2_by_composition(r):
         "--dedup",
     ]
 
-    if bool(_cfg_get(r, "stage2.composition_constraint_drop_zero_overlap", False)):
+    if bool(
+        _cfg_get_compat(
+            r,
+            "composition_constraint.drop_zero_overlap",
+            "stage2.composition_constraint_drop_zero_overlap",
+            False,
+        )
+    ):
         cmd.append("--drop_zero_overlap")
 
     _run_cmd(cmd)
@@ -306,7 +338,7 @@ def add_composition_fallback(r):
     _require_file(script, "composition fallback script")
     _require_file(input_csv, "stage2_unique_csv")
 
-    top_n_fallback = _cfg_get(r, "stage2.fallback_top_n", 20)
+    top_n_fallback = _cfg_get_compat(r, "fallback.top_n", "stage2.fallback_top_n", 20)
 
     _run_cmd([
         "python", script,
@@ -352,9 +384,13 @@ def retrieve_stage2_candidates(r):
     _require_file(input_csv, "stage2_unique_csv")
     _require_file(template_dir / "precursor_names.json", "precursor_names.json")
 
-    top_k = _cfg_get(r, "stage2.retrieval_top_k", 50)
-    min_similarity = _cfg_get(r, "stage2.retrieval_min_similarity", 0.0)
-    label_threshold = _cfg_get(r, "stage2.retrieval_label_threshold", 0.5)
+    top_k = _cfg_get_compat(r, "retrieval.top_k", "stage2.retrieval_top_k", 50)
+    min_similarity = _cfg_get_compat(
+        r, "retrieval.min_similarity", "stage2.retrieval_min_similarity", 0.0
+    )
+    label_threshold = _cfg_get_compat(
+        r, "retrieval.label_threshold", "stage2.retrieval_label_threshold", 0.5
+    )
 
     _run_cmd([
         "python", script,
@@ -386,8 +422,9 @@ def predict_stage2_baseline(r):
     output_csv = work_dir / "stage2_summary" / "extratrees_baseline_candidates.csv"
     summary_json = work_dir / "stage2_summary" / "extratrees_baseline_candidates_summary.json"
 
-    model_path = Path(str(_cfg_get(
+    model_path = Path(str(_cfg_get_compat(
         r,
+        "baseline.model",
         "stage2.baseline_model",
         project_root / "runs/stage2/extratrees_multilabel_hybrid_gold_only_v1/stage2_extratrees_multilabel.joblib",
     )))
@@ -405,10 +442,10 @@ def predict_stage2_baseline(r):
             work_dir / "stage2_hybrid",
         ))
 
-        top_k_labels = _cfg_get(r, "stage2.baseline_top_k_labels", 12)
-        top_k_sets = _cfg_get(r, "stage2.baseline_top_k_sets", 30)
-        min_prob = _cfg_get(r, "stage2.baseline_min_prob", 0.02)
-        max_set_size = _cfg_get(r, "stage2.baseline_max_set_size", 4)
+        top_k_labels = _cfg_get_compat(r, "baseline.top_k_labels", "stage2.baseline_top_k_labels", 12)
+        top_k_sets = _cfg_get_compat(r, "baseline.top_k_sets", "stage2.baseline_top_k_sets", 30)
+        min_prob = _cfg_get_compat(r, "baseline.min_prob", "stage2.baseline_min_prob", 0.02)
+        max_set_size = _cfg_get_compat(r, "baseline.max_set_size", "stage2.baseline_max_set_size", 4)
 
         _run_cmd([
             "python", script,
@@ -510,10 +547,14 @@ def rerank_stage2_by_elements(r):
     _require_file(script, "element-aware Stage2 rerank script")
     _require_file(input_csv, "stage2_merged_csv")
 
-    top_n = _cfg_get(r, "stage2.element_top_n", 30)
-    coverage_weight = _cfg_get(r, "stage2.element_coverage_weight", 20.0)
-    extra_penalty_weight = _cfg_get(r, "stage2.element_extra_penalty_weight", 5.0)
-    rank_weight = _cfg_get(r, "stage2.element_rank_weight", 0.01)
+    top_n = _cfg_get_compat(r, "element_rerank.top_n", "stage2.element_top_n", 30)
+    coverage_weight = _cfg_get_compat(
+        r, "element_rerank.coverage_weight", "stage2.element_coverage_weight", 20.0
+    )
+    extra_penalty_weight = _cfg_get_compat(
+        r, "element_rerank.extra_penalty_weight", "stage2.element_extra_penalty_weight", 5.0
+    )
+    rank_weight = _cfg_get_compat(r, "element_rerank.rank_weight", "stage2.element_rank_weight", 0.01)
 
     _run_cmd([
         "python", script,

@@ -114,7 +114,7 @@ Lightweight checks:
 
 ```bash
 python -m compileall -q pipeline training synthmind tests
-python -m unittest discover -s tests/research -p 'test_*.py'
+python -m unittest discover -s tests -p 'test_*.py'
 python pipeline/run_pipeline.py --help
 ```
 

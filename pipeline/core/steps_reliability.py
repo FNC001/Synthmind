@@ -96,6 +96,11 @@ def _project_root(r, cfg: dict) -> Path:
     return Path(cfg.get("project_root", getattr(r, "project_root", "")))
 
 
+def _project_path(project_root: Path, value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else project_root / path
+
+
 def _first_existing(paths: list[str | Path]) -> Path | None:
     for p in paths:
         if not p:
@@ -907,6 +912,11 @@ def add_v43_route_template_features_if_enabled(r, cfg: dict) -> None:
         print("[SKIP disabled] add_v43_route_template_features")
         return
 
+    v43_cfg = cfg.get("stage35_v43", {}) or {}
+    if not _bool_enabled(v43_cfg.get("enabled"), True):
+        print("[SKIP disabled] stage35_v43")
+        return
+
     if "route_out_dir" not in r.outputs:
         print("[SKIP] add v43 template features; missing route_out_dir in outputs.")
         return
@@ -914,13 +924,18 @@ def add_v43_route_template_features_if_enabled(r, cfg: dict) -> None:
     project_root = _project_root(r, cfg)
     route_out_dir = Path(r.outputs["route_out_dir"])
 
-    script = (
-        project_root
-        / "pipeline/ranking/v43_template_aware/01_add_route_template_features.py"
+    script_dir = _project_path(
+        project_root,
+        v43_cfg.get("script_dir", "pipeline/ranking/v43_template_aware"),
     )
+    script = script_dir / "01_add_route_template_features.py"
 
     input_csv = _first_existing([
         r.outputs.get("final_top_routes_v3_learned_reranked_csv", ""),
+        str(
+            route_out_dir
+            / v43_cfg.get("input_csv_name", "final_top_routes_v3_learned_reranked.csv")
+        ),
         str(route_out_dir / "final_top_routes_v3_learned_reranked.csv"),
         r.outputs.get("final_top_routes_v3_joint_reranked_csv", ""),
         str(route_out_dir / "final_top_routes_v3_joint_reranked.csv"),
@@ -933,7 +948,9 @@ def add_v43_route_template_features_if_enabled(r, cfg: dict) -> None:
         str(route_out_dir / "final_top_routes.csv"),
     ])
 
-    output_csv = route_out_dir / "synthesis_routes_stage35_v43_template_features.csv"
+    output_csv = route_out_dir / v43_cfg.get(
+        "feature_csv_name", "synthesis_routes_stage35_v43_template_features.csv"
+    )
     output_md = route_out_dir / "synthesis_routes_stage35_v43_template_features.md"
     summary_json = route_out_dir / "synthesis_routes_stage35_v43_template_features_summary.json"
 
@@ -955,7 +972,8 @@ def add_v43_route_template_features_if_enabled(r, cfg: dict) -> None:
         "--output_csv", str(output_csv),
         "--output_md", str(output_md),
         "--summary_json", str(summary_json),
-        "--top_n", str(_get_int(cfg, "final.top_n", 30)),
+        "--top_n",
+        str(_get_int(cfg, "stage35_v43.top_n", _get_int(cfg, "final.top_n", 30))),
     ])
 
     r.outputs["stage35_v43_template_features_csv"] = str(output_csv)
@@ -973,6 +991,11 @@ def apply_v43_template_ranker_if_enabled(r, cfg: dict) -> None:
         print("[SKIP disabled] apply_v43_template_ranker")
         return
 
+    v43_cfg = cfg.get("stage35_v43", {}) or {}
+    if not _bool_enabled(v43_cfg.get("enabled"), True):
+        print("[SKIP disabled] stage35_v43")
+        return
+
     if "route_out_dir" not in r.outputs:
         print("[SKIP] apply v43 template ranker; missing route_out_dir in outputs.")
         return
@@ -980,39 +1003,58 @@ def apply_v43_template_ranker_if_enabled(r, cfg: dict) -> None:
     project_root = _project_root(r, cfg)
     route_out_dir = Path(r.outputs["route_out_dir"])
 
-    script = (
-        project_root
-        / "pipeline/ranking/v43_template_aware/04_apply_v43_template_pairwise_ranker_chemonly.py"
+    script_dir = _project_path(
+        project_root,
+        v43_cfg.get("script_dir", "pipeline/ranking/v43_template_aware"),
     )
+    script = script_dir / "04_apply_v43_template_pairwise_ranker_chemonly.py"
 
     input_csv = _first_existing([
         r.outputs.get("stage35_v43_template_features_csv", ""),
+        str(
+            route_out_dir
+            / v43_cfg.get("feature_csv_name", "synthesis_routes_stage35_v43_template_features.csv")
+        ),
         str(route_out_dir / "synthesis_routes_stage35_v43_template_features.csv"),
         r.outputs.get("final_top_routes_current_csv", ""),
     ])
 
     if input_csv is None:
-        input_csv = route_out_dir / "synthesis_routes_stage35_v43_template_features.csv"
-
-    model_path = Path(
-        cfg.get(
-            "v43_template_ranker_model_path",
-            project_root
-            / "runs/stage35/route_ranker_v43_template_aware/stage35_v43_template_pairwise_chemonly_extratrees.joblib",
+        input_csv = route_out_dir / v43_cfg.get(
+            "feature_csv_name", "synthesis_routes_stage35_v43_template_features.csv"
         )
+
+    model_path = _project_path(
+        project_root,
+        v43_cfg.get(
+            "model_path",
+            cfg.get(
+                "v43_template_ranker_model_path",
+                "runs/stage35/route_ranker_v43_template_aware/stage35_v43_template_pairwise_chemonly_extratrees.joblib",
+            ),
+        ),
     )
 
-    feature_cols_json = Path(
-        cfg.get(
-            "v43_template_ranker_feature_cols_json",
-            project_root
-            / "runs/stage35/route_ranker_v43_template_aware/stage35_v43_template_pairwise_chemonly_feature_cols.json",
-        )
+    feature_cols_json = _project_path(
+        project_root,
+        v43_cfg.get(
+            "feature_cols_json",
+            cfg.get(
+                "v43_template_ranker_feature_cols_json",
+                "runs/stage35/route_ranker_v43_template_aware/stage35_v43_template_pairwise_chemonly_feature_cols.json",
+            ),
+        ),
     )
 
-    output_csv = route_out_dir / "final_top_routes_v43_template_chemonly_reranked.csv"
-    output_md = route_out_dir / "final_top_routes_v43_template_chemonly_reranked.md"
-    summary_json = route_out_dir / "final_top_routes_v43_template_chemonly_reranked_summary.json"
+    output_csv = route_out_dir / v43_cfg.get(
+        "output_csv_name", "final_top_routes_v43_template_chemonly_reranked.csv"
+    )
+    output_md = route_out_dir / v43_cfg.get(
+        "output_md_name", "final_top_routes_v43_template_chemonly_reranked.md"
+    )
+    summary_json = route_out_dir / v43_cfg.get(
+        "summary_json_name", "final_top_routes_v43_template_chemonly_reranked_summary.json"
+    )
 
     if not script.exists():
         print(f"[SKIP] apply v43 template ranker; missing script: {script}")
@@ -1041,7 +1083,8 @@ def apply_v43_template_ranker_if_enabled(r, cfg: dict) -> None:
         "--output_csv", str(output_csv),
         "--output_md", str(output_md),
         "--summary_json", str(summary_json),
-        "--top_n", str(_get_int(cfg, "final.top_n", 30)),
+        "--top_n",
+        str(_get_int(cfg, "stage35_v43.top_n", _get_int(cfg, "final.top_n", 30))),
     ])
 
     r.outputs["final_top_routes_v43_template_chemonly_reranked_csv"] = str(output_csv)

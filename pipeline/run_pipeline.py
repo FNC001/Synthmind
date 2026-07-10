@@ -183,11 +183,12 @@ def select_final_recommended_routes(r: PipelineRunner) -> None:
     Backward-compatible final output selector.
 
     Priority:
-      1. v4.3 template-aware chem-only reranker
-      2. v3 learned reranker
-      3. v3 joint reranker
-      4. confidence route table
-      5. original final_top_routes
+      1. v4.3 safe-strict reranker
+      2. v4.3 template-aware chem-only reranker
+      3. v3 learned reranker
+      4. v3 joint reranker
+      5. confidence route table
+      6. original final_top_routes
 
     This function does not delete or overwrite historical outputs.
     It only creates a stable final user-facing alias:
@@ -210,6 +211,11 @@ def select_final_recommended_routes(r: PipelineRunner) -> None:
         return
 
     candidates = [
+        (
+            "stage35_v43_safe_strict",
+            r.outputs.get("final_top_routes_v43_safe_strict_reranked_csv"),
+            r.outputs.get("final_top_routes_v43_safe_strict_reranked_md"),
+        ),
         (
             "stage35_v43_template_chemonly",
             r.outputs.get("final_top_routes_v43_template_chemonly_reranked_csv"),

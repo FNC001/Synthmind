@@ -120,7 +120,8 @@ class PipelineRunner:
             "stage2_final_csv": self.work_dir / "stage2_summary/unique_sets_ranked_with_fallback_retrieval_baseline_element_reranked.csv",
             "stage3_hybrid_csv": self.work_dir / "stage3_hybrid/stage3_train_hybrid.csv",
             "stage3_conditioned_x": self.work_dir / "stage3_conditioned_x_fallback_retrieval_baseline_element_reranked.csv",
-            "flow_flat_csv": self.out_dir / "stage3_condition_predictions_flow_fallback_retrieval_baseline_element_reranked/test_candidates_flat.csv",
+            "flow_flat_csv_flow_only": self.out_dir / "stage3_condition_predictions_flow_fallback_retrieval_baseline_element_reranked/test_candidates_flat.csv",
+            "lgbm_flat_csv": self.out_dir / "stage3_condition_predictions_lgbm/test_candidates_flat.csv",
             "route_out_dir": self.out_dir / "routes_flow_fallback_retrieval_baseline_element_reranked",
             "route_csv": self.out_dir / "routes_flow_fallback_retrieval_baseline_element_reranked/synthesis_routes_readable.csv",
             "route_md": self.out_dir / "routes_flow_fallback_retrieval_baseline_element_reranked/synthesis_routes_readable.md",
@@ -143,6 +144,17 @@ class PipelineRunner:
                 restored[key] = str(p)
             else:
                 skipped[key] = str(p)
+
+        flow_csv = self.outputs.get("flow_flat_csv_flow_only")
+        lgbm_csv = self.outputs.get("lgbm_flat_csv")
+        primary_model = self.cfg.get("stage3_comparison", {}).get("primary_model", "lgbm")
+        if primary_model == "flow" and flow_csv:
+            primary_csv = flow_csv
+        else:
+            primary_csv = lgbm_csv or flow_csv
+        if primary_csv:
+            self.outputs["flow_flat_csv"] = primary_csv
+            restored["flow_flat_csv"] = primary_csv
 
         if restored:
             self.log("[RESTORE] existing outputs:")
