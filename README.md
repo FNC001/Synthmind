@@ -120,6 +120,9 @@ python pipeline/run_pipeline.py --help
 
 Full prediction requires the excluded model and data artifacts.
 
+The latest fixed-split retraining and accuracy results are documented in
+[`docs/FULL_RETRAIN_ACCURACY_REPORT_20260710.md`](docs/FULL_RETRAIN_ACCURACY_REPORT_20260710.md).
+
 ## Safety
 
 Synthmind produces predictive synthesis-route recommendations, not validated laboratory procedures. Suggested precursors, temperatures, times, atmospheres, solvents, or process routes must be reviewed by domain experts before experimental use.
