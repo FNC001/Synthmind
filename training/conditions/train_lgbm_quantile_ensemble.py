@@ -105,6 +105,7 @@ def train_quantile_models(
     target_idx: int,
     target_name: str,
     output_dir: Path,
+    target_stats: Dict[str, Any],
     num_boost_round: int = 200,
     early_stopping_rounds: int = 20,
 ) -> Dict[str, Any]:
@@ -146,17 +147,25 @@ def train_quantile_models(
         test_preds[q] = model.predict(X_test_m)
         print(f"    q={q:.1f}: {model.best_iteration} iters")
 
-    # Evaluate: top1 = median (q=0.5)
-    top1_pred = test_preds[0.5]
-    mae = float(np.abs(y_test_m - top1_pred).mean())
-    median_ae = float(np.median(np.abs(y_test_m - top1_pred)))
-    r2 = float(r2_score(y_test_m, top1_pred))
+    # Evaluate in the original physical units recorded by the schema.
+    target_mean = float(target_stats.get("mean", 0.0))
+    target_std = float(target_stats.get("std", 1.0))
+    y_test_raw = y_test_m * target_std + target_mean
+    test_preds_raw = {
+        q: pred * target_std + target_mean for q, pred in test_preds.items()
+    }
+
+    # top1 = median (q=0.5)
+    top1_pred = test_preds_raw[0.5]
+    mae = float(np.abs(y_test_raw - top1_pred).mean())
+    median_ae = float(np.median(np.abs(y_test_raw - top1_pred)))
+    r2 = float(r2_score(y_test_raw, top1_pred))
 
     # Oracle: best quantile per sample
-    all_preds = np.stack([test_preds[q] for q in QUANTILES], axis=1)
-    errors = np.abs(all_preds - y_test_m[:, None])
+    all_preds = np.stack([test_preds_raw[q] for q in QUANTILES], axis=1)
+    errors = np.abs(all_preds - y_test_raw[:, None])
     oracle_pred = all_preds[np.arange(len(y_test_m)), errors.argmin(axis=1)]
-    oracle_mae = float(np.abs(y_test_m - oracle_pred).mean())
+    oracle_mae = float(np.abs(y_test_raw - oracle_pred).mean())
 
     metrics = {
         "top1_mae": mae,
@@ -164,10 +173,12 @@ def train_quantile_models(
         "top1_r2": r2,
         "oracle_mae": oracle_mae,
         "n_test": int(mask_test.sum()),
+        "evaluation_space": "original_units",
+        "unit": "celsius" if target_name == "temp" else "hours",
     }
 
     # Within-threshold metrics
-    abs_err = np.abs(y_test_m - top1_pred)
+    abs_err = np.abs(y_test_raw - top1_pred)
     if target_name == "temp":
         for thresh in [25, 50, 100, 200]:
             metrics[f"top1_within_{thresh}"] = float((abs_err <= thresh).mean())
@@ -396,10 +407,15 @@ def main() -> None:
             short_name = "temp" if "temperature" in name else "time"
             metrics = train_quantile_models(
                 data, idx, short_name, output_dir,
+                target_stats=schema["continuous_schema"].get(name, {}),
                 num_boost_round=args.num_boost_round,
                 early_stopping_rounds=args.early_stopping_rounds,
             )
-            all_metrics[name.replace("_c", "").replace("_h", "")] = metrics
+            report_name = name
+            for suffix in ("_clean", "_c", "_h"):
+                if report_name.endswith(suffix):
+                    report_name = report_name.removesuffix(suffix)
+            all_metrics[report_name] = metrics
 
         metrics_path = output_dir / "metrics.json"
         metrics_path.write_text(json.dumps(all_metrics, indent=2, ensure_ascii=False))

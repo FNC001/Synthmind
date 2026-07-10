@@ -62,6 +62,32 @@ def raw_cont(values_norm: np.ndarray, schema: Mapping[str, Any], names: Sequence
     return out
 
 
+def find_continuous_target(names: Sequence[str], kind: str) -> tuple[int, str]:
+    """Resolve schema variants such as target_temperature_c(_clean)."""
+    normalized_kind = kind.strip().lower()
+    aliases = {
+        "temperature": ("target_temperature_c", "target_temperature_c_clean"),
+        "time": ("target_time_h", "target_time_h_clean"),
+    }
+    if normalized_kind not in aliases:
+        raise ValueError(f"Unknown continuous target kind: {kind}")
+
+    name_list = [str(name) for name in names]
+    for alias in aliases[normalized_kind]:
+        if alias in name_list:
+            return name_list.index(alias), alias
+    for index, name in enumerate(name_list):
+        if normalized_kind in name.lower():
+            return index, name
+    raise ValueError(
+        f"No {normalized_kind} target found in continuous_cols={name_list}"
+    )
+
+
+def continuous_model_key(name: str) -> str:
+    return f"{name}_log1p" if "time" in name.lower() else name
+
+
 def norm_text(value: Any) -> str:
     if value is None:
         return ""
@@ -238,11 +264,11 @@ def train_model_set(
 ) -> Dict[str, Any]:
     models: Dict[str, Any] = {}
 
-    j_temp = list(cont_names).index("target_temperature_c")
+    j_temp, temp_name = find_continuous_target(cont_names, "temperature")
     train_mask = train_sel & (cont_mask["train"][:, j_temp] > 0.5)
     val_mask = val_sel & (cont_mask["val"][:, j_temp] > 0.5)
     if train_mask.sum() >= 50 and val_mask.sum() >= 10:
-        models["target_temperature_c"] = train_lgb_regression(
+        models[continuous_model_key(temp_name)] = train_lgb_regression(
             X["train"][train_mask],
             y_cont_raw["train"][train_mask, j_temp],
             X["val"][val_mask],
@@ -253,12 +279,12 @@ def train_model_set(
             early_stopping_rounds=early_stopping_rounds,
         )
 
-    j_time = list(cont_names).index("target_time_h")
+    j_time, time_name = find_continuous_target(cont_names, "time")
     train_mask = train_sel & (cont_mask["train"][:, j_time] > 0.5)
     val_mask = val_sel & (cont_mask["val"][:, j_time] > 0.5)
     if train_mask.sum() >= 50 and val_mask.sum() >= 10:
         y_time_log = {s: np.log1p(np.clip(y_cont_raw[s][:, j_time], 0.0, None)) for s in X}
-        models["target_time_h_log1p"] = train_lgb_regression(
+        models[continuous_model_key(time_name)] = train_lgb_regression(
             X["train"][train_mask],
             y_time_log["train"][train_mask],
             X["val"][val_mask],
@@ -309,7 +335,7 @@ def predict_routed(
             continue
         model_set = experts.get(method, {})
         for j, name in enumerate(cont_names):
-            key = "target_time_h_log1p" if name == "target_time_h" else name
+            key = continuous_model_key(name)
             model = model_set.get(key) or global_models.get(key)
             if model is None:
                 continue
