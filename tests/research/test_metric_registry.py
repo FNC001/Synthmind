@@ -11,6 +11,7 @@ class MetricRegistryTest(unittest.TestCase):
         self.assertIn("e2e_route.iid.complete_case.route_ref_match@1", ids)
         self.assertIn("rsp.iid.complete_case.precursor_recall@50", ids)
         self.assertEqual(registry.validate(), [])
+        self.assertTrue(all(registry.get(metric_id).implementation_function.startswith("synthmind.research.") for metric_id in ids))
 
     def test_operational_metric_is_not_reference_accuracy(self):
         registry = MetricRegistry.load(Path("research/specs/metric_registry_v1.yaml"))

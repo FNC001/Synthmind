@@ -7,9 +7,16 @@ PyYAML>=6.0
 tqdm>=4.66
 tabulate>=0.9
 
+# Figure generation
+matplotlib>=3.8
+SciencePlots>=2.1
+ase>=3.22
+
 # Model training and inference
 torch>=2.1
 lightgbm>=4.0
+transformers==4.53.2
+sentencepiece==0.2.0
 chgnet>=0.3
 pymatgen>=2024.0
 mp-api>=0.40

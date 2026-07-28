@@ -1,0 +1,74 @@
+{
+  "release": "Synthmind V1.0",
+  "validation_date": "2026-07-28",
+  "overall_status": "PASS",
+  "source_checks": {
+    "python_compile": {
+      "passed": true,
+      "files": 470
+    },
+    "shell_syntax": {
+      "passed": true,
+      "files": 81
+    },
+    "credential_pattern_scan": {
+      "passed": true
+    },
+    "unit_and_regression_tests": {
+      "passed": 86,
+      "total": 86
+    }
+  },
+  "installation": {
+    "editable_install": "PASS",
+    "reported_version": "1.0.0",
+    "external_data_paths_present": 20,
+    "external_data_paths_required": 20
+  },
+  "workflow": {
+    "validate_fast": "PASS",
+    "validate_full": "PASS",
+    "stage2_candidate_sha256_reproduction": "PASS",
+    "stage3_ensemble_rebuild": "PASS",
+    "three_metric_exact_reproduction": "PASS",
+    "train_profile_dry_run": "PASS",
+    "rebuild_train_profile_dry_run": "PASS"
+  },
+  "training_smoke": {
+    "device": "cuda",
+    "stage2_factorized_generator": {
+      "epochs": 1,
+      "checkpoint_saved": true
+    },
+    "stage3_normalizing_flow": {
+      "epochs": 1,
+      "train_rows": 19788,
+      "validation_rows": 2422,
+      "checkpoint_saved": true,
+      "validation_samples_saved": true
+    }
+  },
+  "inference_smoke": {
+    "device": "cuda",
+    "real_structures": 1,
+    "successful_predictions": 1,
+    "checks_passed": 23,
+    "checks_total": 23,
+    "stage2_weight_hashes_matched": 3,
+    "stage3_weight_hashes_matched": 3,
+    "stage3_samples_per_model": 64
+  },
+  "artifact_integrity": {
+    "manifest_entries_matched_before": 192790,
+    "manifest_entries_total_before": 192790,
+    "manifest_entries_matched_after": 192790,
+    "manifest_entries_total_after": 192790,
+    "structure_files_verified": 62689,
+    "structure_files_total": 62689,
+    "final_semantic_checks_passed": 16,
+    "final_semantic_checks_total": 16,
+    "expanded_release_checks_passed": 33,
+    "expanded_release_checks_total": 33
+  },
+  "scope_note": "Full selected-model retraining was not repeated for this code publication. Exact frozen metric replay, real GPU inference, and one-epoch Stage2/Stage3 GPU training smoke tests were executed."
+}

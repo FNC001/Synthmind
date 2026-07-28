@@ -322,7 +322,7 @@ def artifact_manifest(paths: Iterable[Path]) -> list[dict[str, Any]]:
                 "size_bytes": path.stat().st_size,
                 "sha256": h.hexdigest(),
                 "description": path.name,
-                "primary_result": path.name in {"metrics.json", "RSP_PRUNE_RECOVERY_REPORT.md"},
+                "paper_main_result": path.name in {"metrics.json", "RSP_PRUNE_RECOVERY_REPORT.md"},
                 "diagnostic_result": path.suffix in {".csv", ".json"} or "REPORT" in path.name,
                 "reproducible": True,
             }

@@ -1,0 +1,32 @@
+schema_version: target_cation_family_v1
+description: >-
+  Primary database routing by the set of metallic/framework-cation periodic
+  groups. Anions, exact elements, oxidation states, and stoichiometry remain
+  model features but never create separate primary databases.
+routing_priority:
+  - metals
+  - metalloids
+  - all_elements_fallback
+special_buckets:
+  lanthanoids: LN
+  actinoids: AN
+  unknown: UNK
+ignored_for_primary_routing_when_metal_present:
+  - H
+  - O
+  - F
+  - Cl
+  - Br
+  - I
+  - N
+  - P
+  - S
+  - Se
+examples:
+  LiCl: G01
+  NaCl: G01
+  NaBr: G01
+  Li2O: G01
+  Na2S: G01
+  SrTiO3: G02+G04
+  LiFePO4: G01+G08

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "synthmind"
-version = "0.1.0"
-description = "Synthmind synthesis-route prediction code for inorganic materials."
+version = "1.0.0"
+description = "Structure-to-precursor and synthesis-condition prediction for inorganic materials."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Honglin" }]
@@ -24,11 +24,24 @@ dependencies = [
 models = [
   "torch>=2.1",
   "lightgbm>=4.0",
+  "transformers==4.53.2",
+  "sentencepiece==0.2.0",
   "chgnet>=0.3",
   "pymatgen>=2024.0",
   "mp-api>=0.40",
 ]
 test = ["pytest>=8.0"]
+figures = [
+  "matplotlib>=3.8",
+  "SciencePlots>=2.1",
+  "ase>=3.22",
+]
+
+[project.scripts]
+synthmind = "synthmind.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["synthmind*"]
+include = ["synthmind*", "training*", "pipeline*", "chemistry*"]
+
+[tool.setuptools.package-data]
+"synthmind.chemistry" = ["*.yaml"]

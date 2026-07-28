@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import random
@@ -435,6 +436,7 @@ class GFlowNetPolicy(nn.Module):
         max_traj_len: int,
         x_mlp_hidden_dims: List[int],
         dropout: float = 0.1,
+        family_feature_count: int = 0,
     ):
         super().__init__()
         self.x_dim = int(x_dim)
@@ -442,8 +444,19 @@ class GFlowNetPolicy(nn.Module):
         self.n_actions = int(n_precursors + 1)
         self.max_traj_len = int(max_traj_len)
         self.hidden_dim = int(hidden_dim)
+        self.family_feature_count = int(family_feature_count)
+        if self.family_feature_count < 0 or self.family_feature_count >= self.x_dim:
+            raise ValueError(
+                f"family_feature_count must be in [0, x_dim), got {self.family_feature_count} for x_dim={self.x_dim}"
+            )
 
-        self.x_proj = MLP([x_dim] + x_mlp_hidden_dims + [hidden_dim], dropout=dropout)
+        base_x_dim = x_dim - self.family_feature_count
+        self.x_proj = MLP([base_x_dim] + x_mlp_hidden_dims + [hidden_dim], dropout=dropout)
+        self.family_conditioner = (
+            MLP([self.family_feature_count, hidden_dim, hidden_dim * 2], dropout=dropout)
+            if self.family_feature_count
+            else None
+        )
         self.set_proj = MLP([n_precursors, hidden_dim, hidden_dim], dropout=dropout)
         self.step_emb = nn.Embedding(max_traj_len + 1, hidden_dim)
         self.policy_head = MLP([hidden_dim * 3, hidden_dim, self.n_actions], dropout=dropout)
@@ -454,7 +467,16 @@ class GFlowNetPolicy(nn.Module):
         selected_mask: torch.Tensor,
         step_ids: torch.Tensor,
     ) -> torch.Tensor:
-        x_ctx = self.x_proj(x)
+        if self.family_conditioner is None:
+            x_ctx = self.x_proj(x)
+        else:
+            base_x = x[:, : -self.family_feature_count]
+            family_x = x[:, -self.family_feature_count :]
+            x_ctx = self.x_proj(base_x)
+            gamma, beta = self.family_conditioner(family_x).chunk(2, dim=-1)
+            # FiLM-style soft routing lets one shared policy adapt by cation
+            # family without creating brittle per-family vocabularies/models.
+            x_ctx = x_ctx * (1.0 + 0.1 * torch.tanh(gamma)) + beta
         set_ctx = self.set_proj(selected_mask)
         step_ctx = self.step_emb(step_ids)
         state = torch.cat([x_ctx, set_ctx, step_ctx], dim=-1)
@@ -574,6 +596,26 @@ def teacher_forcing_loss(
         selected = update_selected_non_inplace(selected, tgt, stop_id)
 
     return torch.stack(losses, dim=1).sum() / traj_mask.sum().clamp_min(1.0)
+
+
+def shuffle_teacher_actions(
+    traj_actions: torch.Tensor,
+    traj_mask: torch.Tensor,
+    stop_id: int,
+) -> torch.Tensor:
+    """Randomize precursor order while keeping STOP last for set-order invariance."""
+    shuffled = traj_actions.clone()
+    for row_index in range(traj_actions.shape[0]):
+        valid_count = int(traj_mask[row_index].sum().item())
+        precursor_count = max(0, valid_count - 1)
+        if precursor_count <= 1:
+            continue
+        permutation = torch.randperm(precursor_count, device=traj_actions.device)
+        shuffled[row_index, :precursor_count] = traj_actions[
+            row_index, :precursor_count
+        ][permutation]
+        shuffled[row_index, precursor_count] = int(stop_id)
+    return shuffled
 
 
 def reward_from_sets(
@@ -1405,7 +1447,7 @@ def train_reranker(
         if val_loss < best_val:
             best_val = val_loss
             best_state = {
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": copy.deepcopy(model.state_dict()),
                 "best_val_loss": float(val_loss),
                 "input_dim": int(train_feats.shape[1]),
                 "hidden_dims": hidden_dims,
@@ -1511,6 +1553,12 @@ def main() -> None:
     )
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--x_mlp_hidden_dims", type=str, default="512")
+    parser.add_argument(
+        "--family_feature_count",
+        type=int,
+        default=0,
+        help="Treat the final N input features as binary cation-family indicators and apply FiLM conditioning.",
+    )
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=100)
@@ -1518,7 +1566,22 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--metric_name", type=str, default="samples_f1")
+    parser.add_argument(
+        "--checkpoint_selection",
+        choices=("validation", "last"),
+        default="validation",
+        help=(
+            "Select the checkpoint by validation metric, or always keep the final epoch. "
+            "Use 'last' for leakage-safe outer-fold candidate generation."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--teacher_permutations",
+        type=int,
+        default=1,
+        help="Number of random valid precursor orders averaged per supervised batch; 1 preserves the stored order.",
+    )
 
     # weak RL
     parser.add_argument("--warmup_epochs", type=int, default=10)
@@ -1552,6 +1615,11 @@ def main() -> None:
         type=str,
         default="",
         help="Path to pretrained model checkpoint for curriculum/finetune training.",
+    )
+    parser.add_argument(
+        "--freeze_pretrained_policy",
+        action="store_true",
+        help="Skip policy updates and train/evaluate only the candidate reranker from --pretrained_model.",
     )
 
     # optional element soft-bias decoding for candidate collection
@@ -1652,11 +1720,14 @@ def main() -> None:
         max_traj_len=int(max_traj_len),
         x_mlp_hidden_dims=parse_hidden_dims(args.x_mlp_hidden_dims),
         dropout=float(args.dropout),
+        family_feature_count=int(args.family_feature_count),
     ).to(device)
 
+    pretrained_checkpoint: Dict[str, Any] = {}
     if args.pretrained_model and Path(args.pretrained_model).exists():
         print(f"[Info] Loading pretrained model from {args.pretrained_model}")
         ckpt = torch.load(args.pretrained_model, map_location=device, weights_only=False)
+        pretrained_checkpoint = ckpt if isinstance(ckpt, dict) else {}
         state_dict = ckpt.get("model_state_dict", ckpt)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
@@ -1677,7 +1748,39 @@ def main() -> None:
     bad_epochs = 0
     train_log: List[Dict[str, Any]] = []
 
-    for epoch in range(1, int(args.epochs) + 1):
+    # A finetuning run must never discard a stronger source checkpoint merely
+    # because every augmented-data epoch is worse.  Seed early stopping with
+    # the pretrained validation metric and state, then require a real gain.
+    if pretrained_checkpoint and not args.freeze_pretrained_policy:
+        source_metric = float(pretrained_checkpoint.get("best_val_metric", math.nan))
+        if math.isfinite(source_metric):
+            best_metric = source_metric
+            best_epoch = int(pretrained_checkpoint.get("epoch", -1))
+            best_state = {
+                **pretrained_checkpoint,
+                "model_state_dict": copy.deepcopy(model.state_dict()),
+                "config": vars(args),
+                "finetune_source_metric": source_metric,
+            }
+            print(
+                f"[Info] Finetune must improve source val metric={source_metric:.6f}",
+                flush=True,
+            )
+
+    if args.freeze_pretrained_policy:
+        if not pretrained_checkpoint:
+            raise ValueError("--freeze_pretrained_policy requires a valid --pretrained_model checkpoint")
+        best_metric = float(pretrained_checkpoint.get("best_val_metric", math.nan))
+        best_epoch = int(pretrained_checkpoint.get("epoch", -1))
+        best_state = {
+            **pretrained_checkpoint,
+            "model_state_dict": copy.deepcopy(model.state_dict()),
+            "config": vars(args),
+        }
+        torch.save(best_state, run_dir / "best_model.pt")
+        print(f"[Info] Frozen pretrained policy at source epoch={best_epoch}, val_metric={best_metric}")
+
+    for epoch in range(1, (0 if args.freeze_pretrained_policy else int(args.epochs)) + 1):
         model.train()
         epoch_sup_losses: List[float] = []
         epoch_rl_losses: List[float] = []
@@ -1689,13 +1792,23 @@ def main() -> None:
             traj_actions = traj_actions.to(device)
             traj_mask = traj_mask.to(device)
 
-            sup_loss = teacher_forcing_loss(
-                model=model,
-                x=x,
-                traj_actions=traj_actions,
-                traj_mask=traj_mask,
-                stop_id=stop_id,
-            )
+            supervised_losses = []
+            for permutation_index in range(max(1, int(args.teacher_permutations))):
+                actions_for_loss = (
+                    traj_actions
+                    if int(args.teacher_permutations) == 1
+                    else shuffle_teacher_actions(traj_actions, traj_mask, stop_id)
+                )
+                supervised_losses.append(
+                    teacher_forcing_loss(
+                        model=model,
+                        x=x,
+                        traj_actions=actions_for_loss,
+                        traj_mask=traj_mask,
+                        stop_id=stop_id,
+                    )
+                )
+            sup_loss = torch.stack(supervised_losses).mean()
 
             if epoch > int(args.warmup_epochs) and float(args.rl_weight) > 0:
                 _, pred_y, logprob_sum = sample_decode_train(
@@ -1765,12 +1878,17 @@ def main() -> None:
             f"best={max(best_metric, cur_metric):.4f}"
         )
 
-        if cur_metric > best_metric:
+        select_current = (
+            str(args.checkpoint_selection) == "last" or cur_metric > best_metric
+        )
+        if select_current:
             best_metric = cur_metric
             best_epoch = epoch
             bad_epochs = 0
             best_state = {
-                "model_state_dict": model.state_dict(),
+                # state_dict tensors otherwise keep references to the live model
+                # and silently drift after the selected best epoch.
+                "model_state_dict": copy.deepcopy(model.state_dict()),
                 "epoch": int(epoch),
                 "best_val_metric": float(cur_metric),
                 "config": vars(args),
@@ -1786,7 +1904,10 @@ def main() -> None:
         else:
             bad_epochs += 1
 
-        if bad_epochs >= int(args.patience):
+        if (
+            str(args.checkpoint_selection) == "validation"
+            and bad_epochs >= int(args.patience)
+        ):
             print(f"[Early Stop] patience reached at epoch {epoch}")
             break
 

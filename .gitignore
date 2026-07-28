@@ -12,6 +12,8 @@ outputs/
 runs/
 logs/
 tmp/
+/work/
+/artifacts/
 *.tgz
 *.tar.gz
 *.zip
@@ -38,3 +40,16 @@ page-*.png
 *.key
 id_rsa*
 known_hosts
+
+# Authorized full-lineage artifact trees are mounted externally for V1.0.
+/00_OVERVIEW_AND_MANIFEST/
+/02_RAW_DATA/
+/03_CLEANED_AND_MERGED_DATA/
+/04_SPLITS/
+/05_FEATURES_AND_EMBEDDINGS/
+/06_TRAIN_READY_DATA/
+/07_BEST_MODELS/
+/08_GENERATED_OUTPUTS/
+/09_ACCURACY_EVALUATION/
+/10_METHODS_AND_GUIDES/
+/11_TESTS_AND_AUDITS/

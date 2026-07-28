@@ -1,0 +1,173 @@
+{
+  "v32": {
+    "name": "benchmark_100_v32_mp_metadata_aware_stage3_alignment",
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/pipeline_v3/scripts/benchmark_100_v32_mp_metadata_aware_stage3_alignment/run_full_v32_mp_metadata_aware_stage3_alignment.sh",
+    "metadata_alignment_csv": "outputs/benchmark_100_v32_mp_metadata_aware_stage3_alignment/metadata_aware_alignment_v32/v32_metadata_aware_external_stage3_alignment_summary.csv",
+    "metadata_alignment_summary_json": "outputs/benchmark_100_v32_mp_metadata_aware_stage3_alignment/metadata_aware_alignment_v32/v32_metadata_aware_external_stage3_alignment_summary.json",
+    "stage3_candidates_with_metadata_csv": "outputs/benchmark_100_v32_mp_metadata_aware_stage3_alignment/stage3_candidates_with_metadata_v32/v32_stage3_candidates_with_mp_metadata.csv",
+    "stage3_candidates_with_metadata_summary_json": "outputs/benchmark_100_v32_mp_metadata_aware_stage3_alignment/stage3_candidates_with_metadata_v32/v32_stage3_candidates_with_mp_metadata_summary.json"
+  },
+  "v33": {
+    "name": "benchmark_100_v33_stage3_library_expansion_or_direct_formula_mapping",
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/pipeline_v3/scripts/benchmark_100_v33_stage3_library_expansion_or_direct_formula_mapping/run_full_v33_stage3_library_expansion.sh",
+    "request_manifest_csv": "outputs/benchmark_100_v33_stage3_library_expansion_or_direct_formula_mapping/stage3_expansion_request_manifest_v33/v33_stage3_expansion_request_manifest.csv",
+    "request_manifest_summary_json": "outputs/benchmark_100_v33_stage3_library_expansion_or_direct_formula_mapping/stage3_expansion_request_manifest_v33/v33_stage3_expansion_request_manifest_summary.json"
+  },
+  "v34": {
+    "name": "benchmark_100_v34_real_stage3_expansion_from_v33_manifest",
+    "check_script": "scripts/07_infer/structure_to_synthesis_route/pipeline_v3/scripts/benchmark_100_v34_real_stage3_expansion_from_v33_manifest/01_check_existing_stage3_for_v33_targets_v34.py",
+    "discover_script": "scripts/07_infer/structure_to_synthesis_route/pipeline_v3/scripts/benchmark_100_v34_real_stage3_expansion_from_v33_manifest/02_discover_existing_stage3_exports_for_v33_targets_v34.py",
+    "existing_check_output_dir": "outputs/benchmark_100_v34_real_stage3_expansion_from_v33_manifest/existing_stage3_check_v34",
+    "discovery_output_dir": "outputs/benchmark_100_v34_real_stage3_expansion_from_v33_manifest/existing_stage3_export_discovery_v34",
+    "existing_check_summary_json": "outputs/benchmark_100_v34_real_stage3_expansion_from_v33_manifest/existing_stage3_check_v34/v34_existing_stage3_target_check_summary.json",
+    "discovery_summary_json": "outputs/benchmark_100_v34_real_stage3_expansion_from_v33_manifest/existing_stage3_export_discovery_v34/v34_existing_stage3_export_discovery_summary.json",
+    "discovered_rows_csv": "outputs/benchmark_100_v34_real_stage3_expansion_from_v33_manifest/existing_stage3_export_discovery_v34/v34_discovered_existing_stage3_rows_for_requested_targets.csv"
+  },
+  "v40e": {
+    "name": "benchmark_100_v40e_register_partial_flow_patch_into_stage3_reference",
+    "enabled": true,
+    "registered_patch_csv": "outputs/benchmark_100_v40e_register_partial_flow_patch_into_stage3_reference/registered_reference_patch_v40e/v40e_registered_stage3_reference_patch.csv",
+    "source_label": "v40e_registered_partial_flow_patch",
+    "priority": -1,
+    "claim_boundary": "partial_real_stage3_flow_patch_not_experimental_validation"
+  },
+  "v41": {
+    "name": "benchmark_100_v41_stage3_feature_regeneration_for_remaining_v33_targets",
+    "enabled": true,
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v41_stage3_feature_regeneration_for_remaining_v33_targets/run_full_v41_stage3_feature_regeneration_readiness.sh",
+    "summary_json": "outputs/benchmark_100_v41_stage3_feature_regeneration_for_remaining_v33_targets/stage3_feature_regeneration_readiness_v41/v41_feature_regeneration_readiness_summary.json",
+    "readiness_csv": "outputs/benchmark_100_v41_stage3_feature_regeneration_for_remaining_v33_targets/stage3_feature_regeneration_readiness_v41/v41_remaining_targets_feature_regeneration_readiness.csv"
+  },
+  "v42": {
+    "name": "benchmark_100_v42_recover_structure_sources_from_mp_json_for_remaining_v33_targets",
+    "enabled": true,
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v42_recover_structure_sources_from_mp_json_for_remaining_v33_targets/run_full_v42_recover_structure_sources_from_mp_json.sh",
+    "summary_json": "outputs/benchmark_100_v42_recover_structure_sources_from_mp_json_for_remaining_v33_targets/mp_json_structure_source_audit_v42/v42_mp_json_structure_source_audit_summary.json",
+    "audit_csv": "outputs/benchmark_100_v42_recover_structure_sources_from_mp_json_for_remaining_v33_targets/mp_json_structure_source_audit_v42/v42_mp_json_structure_source_audit.csv"
+  },
+  "v43": {
+    "name": "benchmark_100_v43_reconstruct_poscar_from_mp_json_for_remaining_v33_targets",
+    "enabled": true,
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v43_reconstruct_poscar_from_mp_json_for_remaining_v33_targets/run_full_v43_reconstruct_poscar_from_mp_json.sh",
+    "summary_json": "outputs/benchmark_100_v43_reconstruct_poscar_from_mp_json_for_remaining_v33_targets/audit_v43/v43_recovered_poscar_summary.json",
+    "poscar_dir": "outputs/benchmark_100_v43_reconstruct_poscar_from_mp_json_for_remaining_v33_targets/recovered_poscar_v43",
+    "audit_csv": "outputs/benchmark_100_v43_reconstruct_poscar_from_mp_json_for_remaining_v33_targets/audit_v43/v43_recovered_poscar_audit.csv"
+  },
+  "v43b": {
+    "name": "benchmark_100_v43b_validate_recovered_poscar_structures",
+    "enabled": true,
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v43b_validate_recovered_poscar_structures/run_full_v43b_validate_recovered_poscar_structures.sh",
+    "summary_json": "outputs/benchmark_100_v43b_validate_recovered_poscar_structures/audit_v43b/v43b_poscar_validation_summary.json",
+    "audit_csv": "outputs/benchmark_100_v43b_validate_recovered_poscar_structures/audit_v43b/v43b_poscar_validation_audit.csv"
+  },
+  "v44": {
+    "name": "benchmark_100_v44_stage3_feature_npz_regeneration_from_v43_poscar",
+    "enabled": true,
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v44_stage3_feature_npz_regeneration_from_v43_poscar/run_full_v44_stage3_feature_npz_regeneration_from_v43_poscar.sh",
+    "summary_json": "outputs/benchmark_100_v44_stage3_feature_npz_regeneration_from_v43_poscar/audit_v44/v44_stage3_feature_npz_regeneration_summary.json",
+    "stage3_input_dir": "outputs/benchmark_100_v44_stage3_feature_npz_regeneration_from_v43_poscar/stage3_input_extension_v44",
+    "stage2_candidates_dir": "outputs/benchmark_100_v44_stage3_feature_npz_regeneration_from_v43_poscar/stage2_candidates_for_v44_regenerated_stage3_export",
+    "audit_csv": "outputs/benchmark_100_v44_stage3_feature_npz_regeneration_from_v43_poscar/audit_v44/v44_stage3_feature_npz_regeneration_audit.csv",
+    "claim_boundary": "structure_backed_schema_compatible_stage3_npz_regeneration_not_experimental_validation"
+  },
+  "v45": {
+    "name": "benchmark_100_v45_real_stage3_export_from_v44_regenerated_features",
+    "enabled": true,
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v45_real_stage3_export_from_v44_regenerated_features/run_full_v45_real_stage3_export_from_v44_regenerated_features.sh",
+    "summary_json": "outputs/benchmark_100_v45_real_stage3_export_from_v44_regenerated_features/audit_v45/v45_stage3_export_summary.json",
+    "raw_candidates_csv": "outputs/benchmark_100_v45_real_stage3_export_from_v44_regenerated_features/merged_stage3_candidates_v45/v45_real_stage3_candidates_from_v44_features_raw.csv",
+    "flow_export_dir": "outputs/benchmark_100_v45_real_stage3_export_from_v44_regenerated_features/flow_export_v45",
+    "mdn_export_dir": "outputs/benchmark_100_v45_real_stage3_export_from_v44_regenerated_features/mdn_export_v45",
+    "claim_boundary": "real_stage3_flow_from_v44_regenerated_features_not_experimental_validation"
+  },
+  "v45b": {
+    "name": "benchmark_100_v45b_normalize_v45_stage3_candidates_and_register_patch",
+    "enabled": true,
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v45b_normalize_v45_stage3_candidates_and_register_patch/run_full_v45b_normalize_v45_stage3_candidates_and_register_patch.sh",
+    "summary_json": "outputs/benchmark_100_v45b_normalize_v45_stage3_candidates_and_register_patch/audit_v45b/v45b_registered_stage3_reference_patch_summary.json",
+    "registered_patch_csv": "outputs/benchmark_100_v45b_normalize_v45_stage3_candidates_and_register_patch/registered_reference_patch_v45b/v45b_registered_stage3_reference_patch.csv",
+    "source_label": "v45b_registered_v44_regenerated_flow_patch",
+    "priority": -2,
+    "claim_boundary": "real_stage3_flow_from_v44_regenerated_features_not_experimental_validation"
+  },
+  "v45b_register": {
+
+    "name": "benchmark_100_v45b_normalize_v45_stage3_candidates_and_register_patch",
+
+    "enabled": true,
+
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v45b_normalize_v45_stage3_candidates_and_register_patch/run_full_v45b_normalize_v45_stage3_candidates_and_register_patch.sh",
+
+    "summary_json": "outputs/benchmark_100_v45b_normalize_v45_stage3_candidates_and_register_patch/audit_v45b_register/v45b_register_patch_summary.json",
+
+    "registered_patch_csv": "outputs/benchmark_100_v45b_normalize_v45_stage3_candidates_and_register_patch/registered_reference_patch_v45b/v45b_registered_stage3_reference_patch.csv",
+
+    "claim_boundary": "registered_v45b_patch_not_experimental_validation"
+
+  },
+"v48": {
+  "name": "benchmark_100_v48_flow_export_with_global_stage3_clip_range",
+  "enabled": true,
+  "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v48_flow_export_with_global_stage3_clip_range/run_full_v48_flow_export_with_global_stage3_clip_range.sh",
+  "summary_json": "outputs/benchmark_100_v48_flow_export_with_global_stage3_clip_range/audit_v48/v48_global_clip_flow_export_summary.json",
+  "normalized_candidates_csv": "outputs/benchmark_100_v48_flow_export_with_global_stage3_clip_range/normalized_stage3_candidates_v48/v48_global_clip_normalized_stage3_candidates.csv",
+  "audit_csv": "outputs/benchmark_100_v48_flow_export_with_global_stage3_clip_range/audit_v48/v48_global_clip_condition_diversity_audit.csv",
+  "claim_boundary": "global_clipped_flow_candidates_from_v44_regenerated_features_not_original_distribution_v30"
+},
+   "v49": {
+  "name": "benchmark_100_v49_merge_v40c_v48_and_realign_all_v33_gap_cases",
+  "enabled": true,
+  "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v49_merge_v40c_v48_and_realign_all_v33_gap_cases/run_full_v49_merge_v40c_v48_and_realign_all_v33_gap_cases.sh",
+  "summary_json": "outputs/benchmark_100_v49_merge_v40c_v48_and_realign_all_v33_gap_cases/audit_v49/v49_realignment_summary.json",
+  "combined_patch_csv": "outputs/benchmark_100_v49_merge_v40c_v48_and_realign_all_v33_gap_cases/combined_stage3_patch_v49/v49_combined_stage3_candidate_patch.csv",
+  "merged_stage3_library_csv": "outputs/benchmark_100_v49_merge_v40c_v48_and_realign_all_v33_gap_cases/merged_stage3_library_v49/v49_merged_stage3_library_with_v40c_v48_patch.csv",
+  "realignment_summary_csv": "outputs/benchmark_100_v49_merge_v40c_v48_and_realign_all_v33_gap_cases/realignment_v49/v49_all_v33_gap_case_realignment_summary.csv",
+  "comparison_csv": "outputs/benchmark_100_v49_merge_v40c_v48_and_realign_all_v33_gap_cases/audit_v49/v49_v33_gap_vs_v49_realignment_comparison.csv",
+  "claim_boundary": "v49_gap_closure_patch_support_not_equal_feature_provenance"
+},
+  "v50": {
+
+    "name": "benchmark_100_v50_final_full_gap_closure_report_and_release_package",
+
+    "enabled": true,
+
+    "run_script": "scripts/07_infer/structure_to_synthesis_route/benchmark/benchmark_100_v50_final_full_gap_closure_report_and_release_package/run_full_v50_final_full_gap_closure_report_and_release_package.sh",
+
+    "summary_json": "outputs/benchmark_100_v50_final_full_gap_closure_report_and_release_package/audit_v50/v50_final_gap_closure_summary.json",
+
+    "final_report_md": "outputs/benchmark_100_v50_final_full_gap_closure_report_and_release_package/FINAL_REPORT_V50/FINAL_BENCHMARK_100_V50_REPORT.md",
+
+    "claim_boundary": "final_gap_closure_report_internal_validation_not_experimental_validation"
+
+  }, 
+  "registered_patches": [
+    {
+      "name": "v45b_registered_v44_regenerated_flow_patch",
+      "enabled": true,
+      "path": "outputs/benchmark_100_v45b_normalize_v45_stage3_candidates_and_register_patch/registered_reference_patch_v45b/v45b_registered_stage3_reference_patch.csv",
+      "source_label": "v45b_registered_v44_regenerated_flow_patch",
+      "priority": -2,
+      "claim_boundary": "real_stage3_flow_from_v44_regenerated_features_not_experimental_validation"
+    },
+    {
+      "name": "v40e_registered_partial_flow_patch",
+      "enabled": true,
+      "path": "outputs/benchmark_100_v40e_register_partial_flow_patch_into_stage3_reference/registered_reference_patch_v40e/v40e_registered_stage3_reference_patch.csv",
+      "source_label": "v40e_registered_partial_flow_patch",
+      "priority": -1,
+      "claim_boundary": "partial_real_stage3_flow_patch_not_experimental_validation"
+    }
+  ],
+  "current_reference": {
+    "output_reference_csv": "data/interim/references/stage3_condition_reference/current/stage3_condition_reference.csv",
+    "refresh_output_dir": "outputs/stage3_reference_refresh"
+  },
+  "v45e": {
+    "name": "v45e_registered_regenerated_flow_patch",
+    "enabled": true,
+    "path": "outputs/benchmark_100_v45b_normalize_v45_stage3_candidates_and_realign/normalized_stage3_candidates_v45b/v45b_normalized_stage3_reference_patch.csv",
+    "source_label": "v45e_registered_regenerated_flow_patch",
+    "priority": 0,
+    "claim_boundary": "real_stage3_flow_outputs_from_v44_regenerated_features_not_experimental_validation"
+  }
+}

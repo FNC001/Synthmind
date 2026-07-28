@@ -1,0 +1,25 @@
+run_id: rsp_vnext_006_prune_promotion
+output_dir: outputs/autorun/rsp_vnext_006_prune_promotion
+
+paths:
+  train_candidates:
+    - outputs/evaluation/stage2_train_oof_top20_candidates_v4_20260612/train_oof_top20_precursor_candidates.csv
+    - outputs/autorun/stage23_optimization_20260618/09_stage2_oof_top50_k3/train_oof_top20_precursor_candidates.csv
+  validation_candidates:
+    - outputs/evaluation/stage2_candidate_pool_v5_20260610/val_candidate_sets_repaired.csv
+  test_candidates:
+    - outputs/evaluation/stage2_candidate_pool_v5_20260610/test_candidate_sets_repaired.csv
+
+pruning:
+  budgets: [50, 200, 500]
+  grid:
+    seed_top: [50, 100, 200]
+    preserve_base_top: [10, 20, 30, 40, 50, 100, 200]
+  max_candidate_size: 8
+  prune_score_offset: -0.02
+
+validation_gate:
+  max_exact1_drop_pp: 0.5
+  min_top50_or_top200_gain_pp: 0.1
+  bootstrap_iterations: 1000
+  ci: 0.95

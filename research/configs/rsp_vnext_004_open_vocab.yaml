@@ -1,0 +1,37 @@
+{
+  "run_id": "rsp_vnext_004_open_vocab_expansion",
+  "output_dir": "outputs/autorun/rsp_vnext_004_open_vocab_expansion",
+  "base_config": "research/configs/rsp_vnext_003.yaml",
+  "open_vocab": {
+    "preserve_base_top": 50,
+    "base_seed_top": 30,
+    "min_sample_oov_risk": 0.2,
+    "method_aux_top": 8,
+    "global_aux_top": 8,
+    "universal_auxiliaries": [
+      "(NH4)2S2O8",
+      "NH4OH",
+      "C2H5OH",
+      "D2O",
+      "D2",
+      "O3",
+      "O",
+      "H2O2",
+      "HNO3",
+      "HCl",
+      "HF",
+      "NaOH",
+      "KOH",
+      "NH4F",
+      "NH4Cl",
+      "NH4NO3",
+      "CH3COOH",
+      "C2H6O2"
+    ],
+    "max_open_generated_per_sample": 40,
+    "max_candidate_size": 9,
+    "min_aux_train_count": 1,
+    "bootstrap_iterations": 1000,
+    "max_exact1_drop_pp": 0.5
+  }
+}

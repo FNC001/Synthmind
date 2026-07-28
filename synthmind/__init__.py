@@ -1,7 +1,4 @@
-"""Synthmind research utilities.
+"""Synthmind materials-synthesis prediction package."""
 
-This package contains non-production research infrastructure. The historical
-script-based pipeline remains the source of truth for deployed inference.
-"""
-
-__all__ = ["research"]
+__all__ = ["chemistry", "research"]
+__version__ = "1.0.0"

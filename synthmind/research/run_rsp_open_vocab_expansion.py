@@ -298,7 +298,7 @@ def write_artifact_manifest(outdir: Path, files: list[Path]) -> None:
                 "size_bytes": path.stat().st_size,
                 "sha256": sha256_file(path),
                 "description": path.name,
-                "primary_result": path.name in {"metrics.json", "RSP_OPEN_VOCAB_REPORT.md"},
+                "paper_main_result": path.name in {"metrics.json", "RSP_OPEN_VOCAB_REPORT.md"},
                 "diagnostic_result": "analysis" in path.name or "ablation" in path.name,
                 "reproducible": True,
             }

@@ -1,0 +1,89 @@
+version: family_routed_v1
+enabled: false
+
+family_schema:
+  version: target_cation_family_v1
+  path: synthmind/chemistry/family_schema_v1.yaml
+  routing_rule: cation_periodic_group_set
+  ignore_anion_for_routing: true
+  ignore_stoichiometry_for_routing: true
+  lanthanide_family: LN
+  actinide_family: AN
+  unknown_family: UNK
+  required_g01_examples: [LiCl, NaCl, NaBr, Li2O, Na2S]
+
+split:
+  seed: 20260713
+  folds: 10
+  validation_fold: 5
+  test_fold: 8
+  grouping: canonical_formula_then_material_id_then_reaction_group
+  selection_uses_test: false
+
+stage2:
+  rows: {train: 18127, validation: 2170, test: 2300}
+  family_feature_count: 24
+  family_conditioning: film
+  global_fallback: true
+  online_retraining: false
+  remote_data: /root/autodl-tmp/synthmind_family_routed_v1/data/stage2_full_cation_family_v1
+  remote_run_root: /root/autodl-tmp/synthmind_family_routed_v1/runs
+  selected_checkpoint: /root/autodl-tmp/synthmind_family_routed_v1/runs/stage2_film_wide768_v1/best_model.pt
+  top1_selector: greedy
+  optional_topk_reranker: /root/autodl-tmp/synthmind_family_routed_v1/runs/stage2_film_wide768_frozen_rerank_v1/best_reranker.pt
+
+stage2_optimization:
+  status: validation_target_met_test_robustness_in_progress
+  protocol: validation_formula_material_disjoint_complete_set_exact_match
+  target_exact_hit_at_10: 0.80
+  current_exact_hit_at_10: 0.8096774193548387
+  current_formula_group_macro_exact_hit_at_10: 0.74797123670578
+  current_metrics: /root/autodl-tmp/synthmind_family_routed_v1/metrics/stage2_layer13_groupbal12_family_m20_val.json
+  current_components:
+    - zero_shot_chemistry_and_cross_attention_rankers
+    - five_fold_oof_candidate_lambdarank_stackers
+    - three_source_rrf_constant_5_weights_1_2_1
+    - validation_frozen_family_anion_group_router_min_support_10
+    - top1_non_degradation_guard_for_tail_expert_routes
+    - formula_group_balanced_tail_experts
+    - formula_group_disjoint_oof_candidate_stacker
+  candidate_oracle_recall: 0.8995391705069125
+  autoregressive_ablation:
+    standard_beam_exact_hit_at_10: 0.5308755760368664
+    standard_beam_exact_hit_at_500: 0.8018433179723502
+    cardinality_beam_exact_hit_at_10: 0.6391705069124424
+    enters_current_best: false
+  test_locked_until_architecture_frozen: false
+  independent_test_audit:
+    simplified_reproducible_17_expert_exact_hit_at_10: 0.5604347826086956
+    best_formula_group_disjoint_19_expert_exact_hit_at_10: 0.5678260869565217
+    best_formula_group_macro_exact_hit_at_10: 0.5804997682571411
+    distribution_shift_detected: true
+    production_ready: false
+  family_router:
+    min_validation_rows: 10
+    min_gain_hits_at_10: 1
+    selection_split: validation_only
+    frozen_for_test: true
+
+stage3:
+  rows: {train: 19788, validation: 2422, test: 2421}
+  family_feature_count: 24
+  precursor_input: predicted_precursor_set_chem_checked
+  precursor_vocab_size: 2996
+  precursor_input_oov: 0
+  gpu_model: multitask_residual_mlp_quantile
+  baseline_model: lightgbm
+  remote_data: /root/autodl-tmp/synthmind_family_routed_v1/data/stage3_full_cation_family_v1
+  remote_run_root: /root/autodl-tmp/synthmind_family_routed_v1/runs
+  selected_heads:
+    temperature_c: no_family_lightgbm
+    time_h: no_family_lightgbm
+    atmosphere_coarse: no_family_lightgbm
+    reaction_method: family_conditioned_lightgbm
+
+release:
+  replace_production_default: false
+  require_validation_ablation_gain: true
+  require_formula_overlap_zero: true
+  registry: /root/autodl-tmp/synthmind_family_routed_v1/registry.json

@@ -1,0 +1,47 @@
+{
+  "status": "optimization_in_progress",
+  "evaluation_protocol": {
+    "stage2": "validation formula/material-disjoint; exact equality of the complete precursor set",
+    "stage3": "validation formula-disjoint; missing-aware relaxed temperature/time/coarse-atmosphere tuple",
+    "test_policy": "test remains untouched until the precursor architecture and fusion are frozen"
+  },
+  "data": {
+    "stage2": {"full": 22597, "train": 18127, "validation": 2170, "test": 2300},
+    "stage3": {"full": 24631, "train": 19788, "validation": 2422, "test": 2421}
+  },
+  "targets": {
+    "precursor_exact_hit_at_10": 0.80,
+    "condition_tuple_hit_at_10": 0.70
+  },
+  "current_validation": {
+    "precursor": {
+      "exact_hit_at_1": 0.31981566820276497,
+      "exact_hit_at_3": 0.4967741935483871,
+      "exact_hit_at_5": 0.6050691244239631,
+      "exact_hit_at_10": 0.7147465437788019,
+      "exact_hit_at_20": 0.7608294930875577,
+      "exact_hit_at_50": 0.8036866359447005,
+      "exact_hit_at_100": 0.8276497695852535,
+      "target_met": false
+    },
+    "condition_tuple": {
+      "missing_aware_relaxed_hit_at_10": 0.8187448389760529,
+      "method_inclusive_hit_at_10": 0.7530966143682907,
+      "strict_comparable_hit_at_10": 0.8625188158554943,
+      "target_met": true
+    }
+  },
+  "stage2_improvement": {
+    "previous_exact_hit_at_10": 0.6963133640552995,
+    "current_exact_hit_at_10": 0.7147465437788019,
+    "absolute_percentage_point_gain": 1.84331797235024,
+    "architecture": "OOF deep family candidate pool plus formula-aware set rankers and RRF fusion"
+  },
+  "artifacts": {
+    "stage2_current": "stage2_formula_ensemble_s606_s1414_fusion_val.json",
+    "stage2_previous": "stage2_oldbest_familypool_listwise_fusion_val.json",
+    "stage2_formula_seed606": "stage2_formula_s606_metrics.json",
+    "stage2_formula_seed1414": "stage2_formula_s1414_metrics.json",
+    "stage3_current": "stage3_condition_topk_val.json"
+  }
+}
